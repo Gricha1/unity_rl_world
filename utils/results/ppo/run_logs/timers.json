@@ -1,0 +1,42 @@
+{
+    "name": "root",
+    "metadata": {
+        "timer_format_version": "0.1.0",
+        "start_time_seconds": "1732695106",
+        "python_version": "3.10.12 (main, Jul  5 2023, 18:54:27) [GCC 11.2.0]",
+        "command_line_arguments": "/home/grisha/anaconda3/envs/mlagents/bin/mlagents-learn --inference --env=big_square_obsts_builded_frame_stack_discrete_act_1.x86_64",
+        "mlagents_version": "1.1.0",
+        "mlagents_envs_version": "1.1.0",
+        "communication_protocol_version": "1.5.0",
+        "pytorch_version": "2.5.1+cu124",
+        "numpy_version": "1.23.5",
+        "end_time_seconds": "1732695106"
+    },
+    "total": 0.05350723800074775,
+    "count": 1,
+    "self": 0.009134366002399474,
+    "children": {
+        "run_training.setup": {
+            "total": 0.022619647003011778,
+            "count": 1,
+            "self": 0.022619647003011778
+        },
+        "TrainerController.start_learning": {
+            "total": 0.021753224995336495,
+            "count": 1,
+            "self": 0.0011797819897765294,
+            "children": {
+                "TrainerController._reset_env": {
+                    "total": 0.020572312001604587,
+                    "count": 1,
+                    "self": 0.020572312001604587
+                },
+                "trainer_threads": {
+                    "total": 1.1310039553791285e-06,
+                    "count": 1,
+                    "self": 1.1310039553791285e-06
+                }
+            }
+        }
+    }
+}
