@@ -1,0 +1,28 @@
+# Training outputs / artifacts
+results/
+train_scripts/results/
+
+# Unity generated folders
+Library/
+Temp/
+Obj/
+Logs/
+UserSettings/
+Build/
+Builds/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.csproj
+*.sln
+*.user
+*.userprefs
+*.pidb
+*.suo
+*.tmp
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

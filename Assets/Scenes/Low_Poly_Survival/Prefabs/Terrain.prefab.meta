@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: e31d877dfa8d9e34bb6047a23a6c0d88
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 100100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 128903
+  packageName: Low Poly Survival modular Kit VR and Mobile
+  packageVersion: 1.0
+  assetPath: Assets/Scenes/Low_Poly_Survival/Prefabs/Terrain.prefab
+  uploadId: 268022

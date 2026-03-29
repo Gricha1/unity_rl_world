@@ -1,0 +1,1 @@
+systeminfo | findstr /I /C:"System Manufacturer" /C:"System Model" /C:"Total Physical Memory"

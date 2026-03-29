@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: f8d0f3737197d764b928916a0cf1d45f
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 100100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 128903
+  packageName: Low Poly Survival modular Kit VR and Mobile
+  packageVersion: 1.0
+  assetPath: Assets/Scenes/Low_Poly_Survival/Prefabs/Trap.prefab
+  uploadId: 268022

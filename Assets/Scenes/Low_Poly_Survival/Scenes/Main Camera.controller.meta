@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: f27d76bbab76c5943b9374223fa52d76
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 9100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 128903
+  packageName: Low Poly Survival modular Kit VR and Mobile
+  packageVersion: 1.0
+  assetPath: Assets/Scenes/Low_Poly_Survival/Scenes/Main Camera.controller
+  uploadId: 268022
