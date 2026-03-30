@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euo
+set -o pipefail
 
 # Periodically runs inference validation and captures video frames.
 #
@@ -66,6 +67,15 @@ print(str(max(steps) if steps else 0))
 PY
 }
 
+python_has_any_checkpoint() {
+  python - <<'PY' "$1"
+import glob, os, sys
+results_dir = sys.argv[1]
+pattern = os.path.join(results_dir, "*", "*-*.onnx")
+print("1" if glob.glob(pattern) else "0")
+PY
+}
+
 read_last_recorded_step() {
   if [ -f "${STATE_FILE}" ]; then
     cat "${STATE_FILE}" 2>/dev/null || echo "0"
@@ -77,6 +87,22 @@ read_last_recorded_step() {
 write_last_recorded_step() {
   local step="$1"
   echo "${step}" > "${STATE_FILE}"
+}
+
+already_recorded_target() {
+  local step="$1"
+  local step_dir="${VIDEO_ROOT}/step_${step}"
+  local mp4="${VIDEO_ROOT}/step_${step}.mp4"
+  if [ -f "${mp4}" ]; then
+    return 0
+  fi
+  if [ -f "${step_dir}/capture_started.txt" ]; then
+    return 0
+  fi
+  if [ -d "${step_dir}" ] && ls "${step_dir}"/frame_*.png >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
 }
 
 run_eval_for_step() {
@@ -147,22 +173,32 @@ echo "[watcher] eval interval ${EVAL_EVERY_STEPS} steps (checkpoint steps may be
 echo "[watcher] last recorded step: ${last_recorded}"
 
 while true; do
+  if [ "$(python_has_any_checkpoint "${RESULTS_DIR}")" != "1" ]; then
+    sleep 20
+    continue
+  fi
+
   latest_step="$(python_latest_checkpoint_step "${RESULTS_DIR}")"
 
   if [ "${latest_step}" -gt 0 ]; then
+    # Backfill: run for all missing targets up to latest_step.
     last_target="$(read_last_recorded_step)"
-    next_target=$((last_target + EVAL_EVERY_STEPS))
-
-    # If we haven't recorded anything yet, start from the first bucket.
     if [ "${last_target}" -le 0 ]; then
-      next_target="${EVAL_EVERY_STEPS}"
+      last_target="0"
     fi
 
-    # Only trigger when the newest checkpoint has reached (or passed) our next target bucket.
-    if [ "${latest_step}" -ge "${next_target}" ]; then
-      run_eval_for_step "${next_target}"
-      write_last_recorded_step "${next_target}"
-    fi
+    max_target=$(( (latest_step / EVAL_EVERY_STEPS) * EVAL_EVERY_STEPS ))
+    target=$((last_target + EVAL_EVERY_STEPS))
+
+    while [ "${target}" -le "${max_target}" ]; do
+      if ! already_recorded_target "${target}"; then
+        run_eval_for_step "${target}"
+      else
+        echo "[watcher] skip step_${target} (already recorded)"
+      fi
+      write_last_recorded_step "${target}"
+      target=$((target + EVAL_EVERY_STEPS))
+    done
   fi
   sleep 20
 done
