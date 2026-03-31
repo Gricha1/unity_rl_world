@@ -16,6 +16,12 @@ public class HpBarVisual : MonoBehaviour
     private IHasHp source;
     private Transform barPivot;
     private Transform fillTransform;
+    private float currentT = 1f;
+    private float tVelocity;
+
+    [Header("Smoothing")]
+    [Tooltip("Сколько секунд занимает сглаживание изменения HP (0 = без сглаживания).")]
+    [SerializeField] private float smoothTimeSeconds = 0.12f;
 
     private void Start()
     {
@@ -89,9 +95,13 @@ public class HpBarVisual : MonoBehaviour
     {
         int max = source.MaxHp;
         if (max <= 0) return;
-        float t = Mathf.Clamp01((float)source.Hp / max);
+        float targetT = Mathf.Clamp01((float)source.Hp / max);
+        if (smoothTimeSeconds > 0f)
+            currentT = Mathf.SmoothDamp(currentT, targetT, ref tVelocity, smoothTimeSeconds);
+        else
+            currentT = targetT;
 
-        float w = barWidth * t;
+        float w = barWidth * currentT;
         fillTransform.localScale = new Vector3(w, barHeight, 1f);
         fillTransform.localPosition = new Vector3(-(barWidth - w) * 0.5f, 0f, 0.02f);
     }

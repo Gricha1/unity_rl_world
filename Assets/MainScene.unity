@@ -16651,6 +16651,12 @@ PrefabInstance:
     - targetCorrespondingSourceObject: {fileID: 4342427395114140049, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       insertIndex: -1
       addedObject: {fileID: 2146228778}
+    - targetCorrespondingSourceObject: {fileID: 4342427395114140049, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 2146228790}
+    - targetCorrespondingSourceObject: {fileID: 4342427395114140049, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 2146228789}
   m_SourcePrefab: {fileID: 100100000, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
 --- !u!1001 &1300557349
 PrefabInstance:
@@ -26477,6 +26483,63 @@ MonoBehaviour:
   barHeight: 0.25
   fillColor: {r: 0.2, g: 0.8, b: 0.2, a: 1}
   backgroundColor: {r: 0.3, g: 0.1, b: 0.1, a: 1}
+--- !u!114 &2146228789
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 441588237}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6bb6b867a41448888c1cd4f99643ad71, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  m_SensorName: RayMiddleZombieJack
+  m_DetectableTags:
+  - Zombie
+  m_RaysPerDirection: 15
+  m_MaxRayDegrees: 73
+  m_SphereCastRadius: 0.5
+  m_RayLength: 1000
+  m_RayLayerMask:
+    serializedVersion: 2
+    m_Bits: 51
+  m_ObservationStacks: 1
+  m_AlternatingRayOrder: 1
+  m_UseBatchedRaycasts: 0
+  rayHitColor: {r: 0.5482785, g: 0.81886786, b: 0.08497676, a: 1}
+  rayMissColor: {r: 1, g: 1, b: 1, a: 1}
+  m_StartVerticalOffset: 0.8
+  m_EndVerticalOffset: 0
+--- !u!114 &2146228790
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 441588237}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6bb6b867a41448888c1cd4f99643ad71, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  m_SensorName: RayPerceptionSensor
+  m_DetectableTags: []
+  m_RaysPerDirection: 3
+  m_MaxRayDegrees: 70
+  m_SphereCastRadius: 0.5
+  m_RayLength: 20
+  m_RayLayerMask:
+    serializedVersion: 2
+    m_Bits: 4294967291
+  m_ObservationStacks: 1
+  m_AlternatingRayOrder: 1
+  m_UseBatchedRaycasts: 0
+  rayHitColor: {r: 1, g: 0, b: 0, a: 1}
+  rayMissColor: {r: 1, g: 1, b: 1, a: 1}
+  m_StartVerticalOffset: 0
+  m_EndVerticalOffset: 0
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

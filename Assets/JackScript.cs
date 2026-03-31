@@ -130,6 +130,29 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
     private int _lastChopActionForAnim;
     private float _doCooldownRemaining;
 
+    [Header("DO vs Zombie")]
+    [Tooltip("Если при выполнении DO рядом есть зомби — агент получает урон.")]
+    [SerializeField] private bool damageOnDoIfZombieNearby = false;
+    [SerializeField] private float zombieNearbyRadiusOnDo = 1.5f;
+    [SerializeField] private int zombieDamageOnDo = 0;
+    [SerializeField] private LayerMask zombieLayer;
+
+    [Header("DO hits Zombie (knockback)")]
+    [Tooltip("Если при выполнении DO рядом есть зомби — отталкиваем зомби немного назад.")]
+    [SerializeField] private bool knockbackZombieOnDo = true;
+    [SerializeField] private float zombieKnockbackRadiusOnDo = 1.6f;
+    [SerializeField] private float zombieKnockbackDistanceOnDo = 0.65f;
+    [SerializeField] private float zombieKnockbackUpOnDo = 0.18f;
+    [SerializeField] private float zombieKnockbackImpulseOnDo = 2.0f;
+    [SerializeField] private float zombieKnockbackUpFactorOnDo = 0.45f;
+    [SerializeField] private float zombieStunSecondsOnDo = 1.0f;
+    [Tooltip("Если true — урон подбирается так, чтобы зомби умирал ровно за 2 удара DO (ceil(MaxHp/2)).")]
+    [SerializeField] private bool zombieDiesInTwoDoHits = true;
+    [Tooltip("Фиксированный урон по зомби при DO (используется если zombieDiesInTwoDoHits = false).")]
+    [SerializeField] private int zombieDamageToZombieOnDo = 1;
+    [Tooltip("Награда Джеку за успешный удар DO по зомби.")]
+    [SerializeField] private float rewardOnZombieHitDo = 1.0f;
+
     public override void Initialize()
     {
         controller = GetComponent<CharacterController>();
@@ -137,6 +160,17 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         _lastShowOptionTaskIcon = showOptionTaskIcon;
         _lastChopActionForAnim = 0;
         _doCooldownRemaining = 0f;
+
+        // Никогда не снимаем HP Джеку за его собственное DO (даже если в инспекторе остались старые сериализованные значения).
+        damageOnDoIfZombieNearby = false;
+        zombieDamageOnDo = 0;
+
+        if (zombieLayer.value == 0)
+        {
+            int zombieLayerId = LayerMask.NameToLayer("Zombie");
+            if (zombieLayerId >= 0)
+                zombieLayer = 1 << zombieLayerId;
+        }
 
         // Jack проходит сквозь цветы: коллизия слой Jack ↔ Flower отключена. Lily на другом слое — застревает и собирает.
         // Важно: у Jack в инспекторе должен быть слой, отличный от Lily (напр. Jack = "Player", Lily = "Default").
@@ -656,6 +690,12 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
         if (doReady)
         {
+            if (damageOnDoIfZombieNearby && zombieDamageOnDo > 0 && IsZombieNearbyForDo())
+                TakeDamage(zombieDamageOnDo);
+
+            if (knockbackZombieOnDo)
+                KnockbackNearbyZombiesOnDo();
+
             if (currentOptionSnapshot == 0)
                 choppedTree = TryChopTree();
             else if (currentOptionSnapshot == 1)
@@ -867,6 +907,125 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         }
 
         _lastChopActionForAnim = chopAction;
+    }
+
+    private bool IsZombieNearbyForDo()
+    {
+        if (zombieNearbyRadiusOnDo <= 0f) return false;
+        if (zombieLayer.value == 0) return false;
+
+        Vector3 origin = transform.position;
+        Collider[] hits = Physics.OverlapSphere(origin, zombieNearbyRadiusOnDo, zombieLayer);
+        if (hits == null || hits.Length == 0) return false;
+
+        foreach (var c in hits)
+        {
+            if (c == null) continue;
+            // Защита от случайных коллайдеров: нужен компонент поведения зомби (на корне или родителе)
+            if (c.GetComponentInParent<ZombieChase>() != null)
+                return true;
+        }
+
+        return false;
+    }
+
+    private void KnockbackNearbyZombiesOnDo()
+    {
+        if (zombieLayer.value == 0) return;
+        if (zombieKnockbackRadiusOnDo <= 0f) return;
+        if (zombieKnockbackDistanceOnDo <= 0f && zombieKnockbackImpulseOnDo <= 0f) return;
+
+        Vector3 origin = transform.position;
+        Collider[] hits = Physics.OverlapSphere(origin, zombieKnockbackRadiusOnDo, zombieLayer);
+        if (hits == null || hits.Length == 0) return;
+
+        // Выбираем ОДНОГО ближайшего зомби (именно объект с ZombieChase),
+        // чтобы за один DO был один "удар" и урон шёл в правильный ZombieHealth.
+        ZombieChase bestZombie = null;
+        Collider bestZombieCollider = null;
+        float bestDist = float.MaxValue;
+        for (int i = 0; i < hits.Length; i++)
+        {
+            var c = hits[i];
+            if (c == null) continue;
+            var z = c.GetComponentInParent<ZombieChase>();
+            if (z == null) continue;
+
+            float d = Vector3.Distance(origin, c.ClosestPoint(origin));
+            if (d < bestDist)
+            {
+                bestDist = d;
+                bestZombie = z;
+                bestZombieCollider = c;
+            }
+        }
+        if (bestZombie == null) return;
+
+        // Награда за сам факт попадания DO по зомби (один раз за DO).
+        if (rewardOnZombieHitDo != 0f)
+            AddReward(rewardOnZombieHitDo);
+
+        // Ищем ZombieHealth на том же корне, что и ZombieChase (не на случайном коллайдере).
+        var zhBest = bestZombie.GetComponent<ZombieHealth>()
+            ?? bestZombie.GetComponentInParent<ZombieHealth>()
+            ?? bestZombie.GetComponentInChildren<ZombieHealth>();
+        if (zhBest != null)
+        {
+            int damage = zombieDamageToZombieOnDo;
+            if (zombieDiesInTwoDoHits)
+                damage = Mathf.Max(1, Mathf.CeilToInt(zhBest.MaxHp / 2f));
+            if (damage > 0)
+                zhBest.TakeDamage(damage, transform.position);
+        }
+        else
+        {
+            // Fallback: иногда ZombieHealth висит на коллайдере-ребёнке, но ZombieChase на корне.
+            if (bestZombieCollider != null)
+            {
+                zhBest = bestZombieCollider.GetComponent<ZombieHealth>()
+                    ?? bestZombieCollider.GetComponentInParent<ZombieHealth>()
+                    ?? bestZombieCollider.GetComponentInChildren<ZombieHealth>();
+                if (zhBest != null)
+                {
+                    int damage = zombieDamageToZombieOnDo;
+                    if (zombieDiesInTwoDoHits)
+                        damage = Mathf.Max(1, Mathf.CeilToInt(zhBest.MaxHp / 2f));
+                    if (damage > 0)
+                        zhBest.TakeDamage(damage, transform.position);
+                }
+            }
+        }
+
+        // Гарантия: даже если по какой-то причине ZombieHealth не стоит/не найден —
+        // считаем 2 удара DO по зомби и уничтожаем его.
+        bestZombie.RegisterJackDoHitAndMaybeDie(2);
+
+        Transform zt = bestZombie.transform;
+        Vector3 dir = (zt.position - origin);
+        dir.y = 0f;
+        if (dir.sqrMagnitude < 0.0001f) dir = zt.forward;
+        dir = dir.normalized;
+
+        // Предпочитаем CharacterController, если он есть (как и в ZombieChase)
+        var zControllerBest = bestZombie.GetComponent<CharacterController>();
+        if (zControllerBest != null && zControllerBest.enabled)
+        {
+            Vector3 delta = dir * zombieKnockbackDistanceOnDo;
+            delta.y = zombieKnockbackUpOnDo;
+            zControllerBest.Move(delta);
+            if (zombieStunSecondsOnDo > 0f)
+                bestZombie.Stun(zombieStunSecondsOnDo);
+            return;
+        }
+
+        var zRbBest = bestZombie.GetComponent<Rigidbody>();
+        if (zRbBest != null)
+        {
+            Vector3 forceDir = (dir + Vector3.up * Mathf.Max(0f, zombieKnockbackUpFactorOnDo)).normalized;
+            zRbBest.AddForce(forceDir * zombieKnockbackImpulseOnDo, ForceMode.Impulse);
+            if (zombieStunSecondsOnDo > 0f)
+                bestZombie.Stun(zombieStunSecondsOnDo);
+        }
     }
 
     private bool TryChopTree()

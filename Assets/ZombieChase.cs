@@ -23,6 +23,35 @@ public class ZombieChase : MonoBehaviour
     private float verticalVelocity;
     private bool useRigidbody;
 
+    [Header("Stun / Freeze")]
+    [Tooltip("Время, до которого зомби не может двигаться (устанавливается через Stun).")]
+    private float stunnedUntilTime = -999f;
+
+    // Счётчик попаданий DO от Джека (нужен, чтобы гарантировать смерть за 2 удара даже без ZombieHealth).
+    private int doHitsFromJack;
+
+    public bool IsStunned => Time.time < stunnedUntilTime;
+
+    public void Stun(float seconds)
+    {
+        if (seconds <= 0f) return;
+        stunnedUntilTime = Mathf.Max(stunnedUntilTime, Time.time + seconds);
+    }
+
+    public void RegisterJackDoHitAndMaybeDie(int hitsToDie = 2)
+    {
+        doHitsFromJack++;
+        if (hitsToDie > 0 && doHitsFromJack >= hitsToDie)
+        {
+            Destroy(gameObject);
+        }
+    }
+
+    private void OnEnable()
+    {
+        doHitsFromJack = 0;
+    }
+
     private void Start()
     {
         controller = GetComponent<CharacterController>();
@@ -44,6 +73,13 @@ public class ZombieChase : MonoBehaviour
 
     private void Update()
     {
+        if (Time.time < stunnedUntilTime)
+        {
+            if (animator != null)
+                animator.SetFloat("Speed", 0f);
+            return;
+        }
+
         Transform target = GetClosestTarget();
         if (target == null)
         {
@@ -92,6 +128,12 @@ public class ZombieChase : MonoBehaviour
     private void FixedUpdate()
     {
         if (rb == null || !useRigidbody) return;
+        if (Time.time < stunnedUntilTime)
+        {
+            // Останавливаем Rigidbody зомби на время стана
+            rb.linearVelocity = Vector3.zero;
+            return;
+        }
         Transform target = GetClosestTarget();
         if (target == null) return;
 

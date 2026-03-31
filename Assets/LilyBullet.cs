@@ -50,7 +50,7 @@ public class LilyBullet : MonoBehaviour
             ?? other.GetComponentInChildren<ZombieHealth>();
         if (zombieHealth != null)
         {
-            zombieHealth.TakeDamage(damage);
+            zombieHealth.TakeDamage(damage, transform.position);
             lilyAgent?.OnBulletHitZombie();
             Destroy(gameObject);
             return;

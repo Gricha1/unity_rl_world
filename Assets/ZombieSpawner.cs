@@ -46,7 +46,22 @@ public class ZombieSpawner : MonoBehaviour
     {
         GameObject zombie = Instantiate(zombiePrefab, spawnPosition, Quaternion.Euler(0f, Random.Range(0f, 360f), 0f), transform);
         SetZombieLayer(zombie);
+        EnsureZombieComponents(zombie);
         zombies.Add(zombie);
+    }
+
+    private static void EnsureZombieComponents(GameObject zombie)
+    {
+        if (zombie == null) return;
+        // Важно: на некоторых префабах компоненты могут быть на корне или на детях.
+        // Для логики игры нам нужен ZombieChase и ZombieAttack на корне (или хотя бы в иерархии),
+        // а ZombieHealth — чтобы зомби умирал от урона.
+        if (zombie.GetComponentInChildren<ZombieChase>() == null)
+            zombie.AddComponent<ZombieChase>();
+        if (zombie.GetComponentInChildren<ZombieAttack>() == null)
+            zombie.AddComponent<ZombieAttack>();
+        if (zombie.GetComponentInChildren<ZombieHealth>() == null)
+            zombie.AddComponent<ZombieHealth>();
     }
 
     private void SetZombieLayer(GameObject zombie)
