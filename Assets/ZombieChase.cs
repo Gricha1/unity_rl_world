@@ -27,8 +27,8 @@ public class ZombieChase : MonoBehaviour
     [Tooltip("Время, до которого зомби не может двигаться (устанавливается через Stun).")]
     private float stunnedUntilTime = -999f;
 
-    // Счётчик попаданий DO от Джека (нужен, чтобы гарантировать смерть за 2 удара даже без ZombieHealth).
-    private int doHitsFromJack;
+    // Счётчик попаданий melee-DO от агентов (Jack/Lily): гарантируем смерть за N ударов даже без ZombieHealth.
+    private int meleeDoHitsFromAgents;
 
     public bool IsStunned => Time.time < stunnedUntilTime;
 
@@ -38,18 +38,21 @@ public class ZombieChase : MonoBehaviour
         stunnedUntilTime = Mathf.Max(stunnedUntilTime, Time.time + seconds);
     }
 
-    public void RegisterJackDoHitAndMaybeDie(int hitsToDie = 2)
+    public void RegisterMeleeDoHitAndMaybeDie(int hitsToDie = 2)
     {
-        doHitsFromJack++;
-        if (hitsToDie > 0 && doHitsFromJack >= hitsToDie)
+        meleeDoHitsFromAgents++;
+        if (hitsToDie > 0 && meleeDoHitsFromAgents >= hitsToDie)
         {
             Destroy(gameObject);
         }
     }
 
+    // Backward compatibility (old name used by Jack).
+    public void RegisterJackDoHitAndMaybeDie(int hitsToDie = 2) => RegisterMeleeDoHitAndMaybeDie(hitsToDie);
+
     private void OnEnable()
     {
-        doHitsFromJack = 0;
+        meleeDoHitsFromAgents = 0;
     }
 
     private void Start()

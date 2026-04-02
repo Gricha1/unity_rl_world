@@ -11,6 +11,8 @@ public class ZombieSpawner : MonoBehaviour
     [SerializeField] private GameObject zombiePrefab;
 
     [Header("Spawn Settings")]
+    [Tooltip("Если true: при старте спавнит 10 зомби сразу, затем раз в 2 секунды добавляет +1 (игнорируя лимит).")]
+    [SerializeField] private bool zombie_from_hills = false;
     [Tooltip("Один зомби появляется каждые столько секунд")]
     [SerializeField] private float spawnInterval = 5f;
     [Tooltip("Максимум зомби на сцене")]
@@ -23,17 +25,29 @@ public class ZombieSpawner : MonoBehaviour
 
     private void Start()
     {
-        nextRespawnTime = Time.time + spawnInterval;
+        if (zombie_from_hills)
+        {
+            // Сразу спавним 10 зомби
+            for (int i = 0; i < 10; i++)
+                SpawnOne();
+
+            // Дальше — раз в 2 секунды +1, независимо от лимита
+            nextRespawnTime = Time.time + 2f;
+        }
+        else
+        {
+            nextRespawnTime = Time.time + spawnInterval;
+        }
     }
 
     private void Update()
     {
         if (zombiePrefab == null) return;
         if (Time.time < nextRespawnTime) return;
-        nextRespawnTime = Time.time + spawnInterval;
+        nextRespawnTime = Time.time + (zombie_from_hills ? 2f : spawnInterval);
 
         RemoveDestroyed();
-        if (zombies.Count < maxZombies)
+        if (zombie_from_hills || zombies.Count < maxZombies)
             SpawnOne();
     }
 

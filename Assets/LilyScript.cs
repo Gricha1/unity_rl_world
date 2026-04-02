@@ -7,21 +7,28 @@ using Unity.MLAgents.Sensors;
 [RequireComponent(typeof(Animator))]
 public class LilyScript : Agent, IHasHp
 {
-    /// <summary>0 = цветы, 1 = поцелуй Джека, 2 = зомби (стрелять по зомби, штраф за попадание в Джека).</summary>
+    /// <summary>0 = цветы, 1 = поцелуй Джека.</summary>
     private int currentOption;
 
-    [Header("Option Selector (HRL)")]
-    [SerializeField] private LilyOptionSelectorAgent optionSelectorAgent;
+    [Header("Option Sampling (Flowers/Kiss)")]
+    [Tooltip("Если true, опция (цветы/поцелуй) выбирается по utility+softmax sampling каждые 20 шагов.")]
+    [SerializeField] private bool useUtilitySoftmaxSampling = false;
+    [Tooltip("Температура softmax (0.2 = почти жёстко, 0.7 = заметно случайно).")]
+    [SerializeField] [Range(0.05f, 2.0f)] private float tau = 0.2f;
+    [Tooltip("Шум eps ~ Uniform[-noise, +noise], добавляется в utility.")]
+    [SerializeField] [Range(0f, 2f)] private float noise = 0.15f;
+    [Tooltip("Макс. дистанция для access (в метрах). Ближе = 1, дальше = 0.")]
+    [SerializeField] [Range(1f, 100f)] private float accessMaxDistance = 20f;
+    [Tooltip("Липкость: насколько выгодно не переключаться без причины (добавка к utility текущей опции).")]
+    [SerializeField] [Range(0f, 2f)] private float stickinessBonus = 0.5f;
 
     [Header("Current Option Icon")]
     [SerializeField] private SpriteRenderer optionIconRenderer;
     [SerializeField] private Sprite optionFlowerSprite;
     [SerializeField] private Sprite optionKissSprite;
-    [SerializeField] private Sprite optionZombieSprite;
     [SerializeField] private Vector3 optionIconOffset = new Vector3(0f, 2.2f, 0f);
     [SerializeField] private float optionFlowerIconScale = 0.45f;
     [SerializeField] private float optionKissIconScale = 0.45f;
-    [SerializeField] private float optionZombieIconScale = 0.45f;
     [SerializeField] private int optionIconSortingOrder = 100;
     [SerializeField] private bool optionIconFaceCamera = true;
     [Tooltip("Снять галочку, чтобы скрыть иконку задачи над агентом.")]
@@ -66,29 +73,21 @@ public class LilyScript : Agent, IHasHp
     [SerializeField] private int maxLove = 100;
     [SerializeField] private float loveDecayInterval = 8f;
 
-    [Header("Shoot")]
-    [SerializeField] private int bulletDamage = 10;
-    [SerializeField] private float bulletSpeed = 15f;
-    [SerializeField] private float shootCooldown = 0.5f;
-    private float shootCooldownTimer;
-
-    [Header("Zombie (опция «зомби»)")]
+    [Header("Zombie (только наблюдения / окружение)")]
     [SerializeField] private LayerMask zombieLayer;
-    [SerializeField] private float zombieHitReward = 10f;
-    [SerializeField] private float jackHitPenalty = -5f;
 
     [Header("HP")]
     [SerializeField] private int maxHp = 100;
     public int hp { get; private set; }
 
     [Header("Curriculum (последовательное обучение)")]
-    [Tooltip("Включить для первой стадии: выстрел ничего не делает, опция «зомби» не выбирается. Action space остаётся 4, наблюдения те же.")]
+    [Tooltip("Включить для первой стадии: у Lily остаются только опции 0 (цветы) и 1 (поцелуй).")]
     [SerializeField] private bool curriculumNoShootNoZombie = false;
 
     [Header("Episode")]
     [SerializeField] private int maxSteps = 1500;
 
-    /// <summary>True — режим curriculum: выстрел отключён, опция зомби недоступна.</summary>
+    /// <summary>True — режим curriculum: у Lily только опции 0/1.</summary>
     public bool CurriculumNoShootNoZombie => curriculumNoShootNoZombie;
 
     private CharacterController controller;
@@ -135,26 +134,10 @@ public class LilyScript : Agent, IHasHp
 
     public void SetOption(int option)
     {
-        if (option < 0 || option > 2)
+        if (option < 0 || option > 1)
             return;
-        if (curriculumNoShootNoZombie && option == 2)
-            option = 0;
         currentOption = option;
         UpdateOptionIconVisual();
-    }
-
-    /// <summary>Вызывается пулей при попадании в объект на слое Zombie.</summary>
-    public void OnBulletHitZombie()
-    {
-        AddReward(zombieHitReward);
-        optionSelectorAgent?.AddOptionReward(2, zombieHitReward);
-    }
-
-    /// <summary>Вызывается пулей при попадании в Джека (слой Jack). Штраф при опции «Зомби».</summary>
-    public void OnBulletHitJack()
-    {
-        AddReward(jackHitPenalty);
-        optionSelectorAgent?.AddOptionReward(2, jackHitPenalty);
     }
 
     public override void Initialize()
@@ -172,7 +155,7 @@ public class LilyScript : Agent, IHasHp
     {
         if (!showOptionTaskIcon) return;
         if (optionIconRenderer != null) return;
-        if (optionFlowerSprite == null && optionKissSprite == null && optionZombieSprite == null) return;
+        if (optionFlowerSprite == null && optionKissSprite == null) return;
 
         var existing = transform.Find("LilyOptionIcon");
         if (existing != null)
@@ -200,7 +183,6 @@ public class LilyScript : Agent, IHasHp
         {
             0 => Mathf.Max(0.01f, optionFlowerIconScale),
             1 => Mathf.Max(0.01f, optionKissIconScale),
-            2 => Mathf.Max(0.01f, optionZombieIconScale),
             _ => 0.35f
         };
         optionIconRenderer.transform.localScale = Vector3.one * s;
@@ -242,10 +224,6 @@ public class LilyScript : Agent, IHasHp
                 optionIconRenderer.sprite = optionKissSprite;
                 optionIconRenderer.enabled = optionKissSprite != null;
                 break;
-            case 2:
-                optionIconRenderer.sprite = optionZombieSprite;
-                optionIconRenderer.enabled = optionZombieSprite != null;
-                break;
             default:
                 optionIconRenderer.enabled = false;
                 break;
@@ -267,9 +245,7 @@ public class LilyScript : Agent, IHasHp
 
         if (Input.GetKeyDown(KeyCode.T))
         {
-            int next = (currentOption + 1) % 3;
-            if (curriculumNoShootNoZombie && next == 2)
-                next = 0;
+            int next = (currentOption + 1) % 2;
             SetOption(next);
         }
     }
@@ -279,7 +255,6 @@ public class LilyScript : Agent, IHasHp
         hp = Mathf.Max(0, hp - amount);
         if (hp <= 0)
         {
-            optionSelectorAgent?.EndEpisode();
             EvalEpisodeTracker.NotifyEpisodeEnded();
             EndEpisode();
         }
@@ -294,18 +269,15 @@ public class LilyScript : Agent, IHasHp
         Love = 0;
         flowerDecayTimer = 0f;
         loveDecayTimer = 0f;
-        shootCooldownTimer = 0f;
         hp = maxHp;
         _lastCollectAction = 0;
         _doCooldownRemaining = 0f;
 
-        // Опция: от селектора или случайная (если селектора нет)
-        if (optionSelectorAgent != null)
-            currentOption = optionSelectorAgent.GetSelectedOption();
+        // Опция: либо utility+softmax, либо случайно
+        if (useUtilitySoftmaxSampling)
+            currentOption = SampleOptionUtilitySoftmax(currentOption);
         else
-            currentOption = Random.Range(0, 3);
-        if (curriculumNoShootNoZombie && currentOption == 2)
-            currentOption = 0;
+            currentOption = Random.Range(0, 2);
 
         // Те же координаты спавна, что у JackScript
         float minX = -20.78f;
@@ -327,6 +299,8 @@ public class LilyScript : Agent, IHasHp
 
         UpdateOptionIconVisual();
     }
+
+    // Опции "зомби" у Lily нет.
 
     private bool GetNearestFlower(out GameObject nearestFlower, out float distance)
     {
@@ -398,10 +372,9 @@ public class LilyScript : Agent, IHasHp
         sensor.AddObservation(transform.position);
         sensor.AddObservation(transform.forward);
 
-        // One-hot опции: 0 = цветы, 1 = поцелуй Джека, 2 = зомби
+        // One-hot опции: 0 = цветы, 1 = поцелуй Джека
         sensor.AddObservation(currentOption == 0 ? 1f : 0f);
         sensor.AddObservation(currentOption == 1 ? 1f : 0f);
-        sensor.AddObservation(currentOption == 2 ? 1f : 0f);
 
         // Счётчики (нормализованные [0,1])
         sensor.AddObservation(maxFlowerCount > 0 ? (float)FlowerCount / maxFlowerCount : 0f);
@@ -429,37 +402,24 @@ public class LilyScript : Agent, IHasHp
 
     public override void OnActionReceived(ActionBuffers actions)
     {
-        if (optionSelectorAgent != null && stepCount == 0)
+        // Utility sampling: пересэмпливаем каждые 20 шагов (если включено)
+        if (useUtilitySoftmaxSampling && stepCount > 0 && (stepCount % 20) == 0)
         {
-            int opt = optionSelectorAgent.GetSelectedOption();
-            if (opt >= 0 && opt <= 2)
-            {
-                if (curriculumNoShootNoZombie && opt == 2)
-                    opt = 0;
-                currentOption = opt;
-                UpdateOptionIconVisual();
-            }
+            currentOption = SampleOptionUtilitySoftmax(currentOption);
+            UpdateOptionIconVisual();
         }
 
         int moveAction = actions.DiscreteActions[0];
         int rotateAction = actions.DiscreteActions[1];
         int collectAction = actions.DiscreteActions[2];
-        int shootAction = actions.DiscreteActions[3];
 
         bool collectJustPressed = collectAction == 1 && _lastCollectAction != 1;
+        // DO актуален для обеих опций: 0 (цветы), 1 (поцелуй)
         bool collectDoRelevant = currentOption == 0 || currentOption == 1;
         bool collectReady = collectJustPressed && _doCooldownRemaining <= 0f && collectDoRelevant;
 
         if (collectReady && animator != null && doActionAnimTrigger.Length > 0)
             animator.SetTrigger(doActionAnimTrigger);
-
-        shootCooldownTimer -= Time.deltaTime;
-        if (shootAction == 1 && shootCooldownTimer <= 0f)
-        {
-            if (!curriculumNoShootNoZombie)
-                SpawnBullet();
-            shootCooldownTimer = shootCooldown;
-        }
 
         float moveInput = 0f;
         if (moveAction == 2) moveInput = 1f;
@@ -509,7 +469,6 @@ public class LilyScript : Agent, IHasHp
             {
                 FlowerCount = Mathf.Min(maxFlowerCount, FlowerCount + 1);
                 AddReward(collectReward);
-                optionSelectorAgent?.AddOptionReward(0, collectReward);
                 prevFlowerDist = -1f;
             }
             else if (GetNearestFlower(out _, out float currDist))
@@ -530,7 +489,6 @@ public class LilyScript : Agent, IHasHp
             {
                 Love = Mathf.Min(maxLove, Love + 1);
                 AddReward(kissReward);
-                optionSelectorAgent?.AddOptionReward(1, kissReward);
                 prevJackDist = -1f;
             }
             else if (jackTarget != null)
@@ -543,8 +501,6 @@ public class LilyScript : Agent, IHasHp
                 prevJackDist = -1f;
             prevFlowerDist = -1f;
         }
-        // Опция 2 (зомби): награда/штраф выдаются в OnBulletHitZombie / OnBulletHitJack из пули
-
         if (collectReady)
             _doCooldownRemaining = Mathf.Max(0f, collectActionCooldownSeconds);
 
@@ -553,32 +509,54 @@ public class LilyScript : Agent, IHasHp
         stepCount++;
         if (stepCount >= maxSteps)
         {
-            optionSelectorAgent?.EndEpisode();
             EvalEpisodeTracker.NotifyEpisodeEnded();
             EndEpisode();
         }
     }
 
-    private void SpawnBullet()
+    private int SampleOptionUtilitySoftmax(int currentOpt)
     {
-        GameObject bullet = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        bullet.name = "LilyBullet";
-        bullet.transform.position = transform.position + Vector3.up * 0.5f + transform.forward * 0.5f;
-        bullet.transform.localScale = Vector3.one * 0.2f;
+        // need: чем меньше прогресс по "цветам/любви", тем выше потребность
+        float flowerRatio = maxFlowerCount > 0 ? (float)FlowerCount / maxFlowerCount : 0f;
+        float loveRatio = maxLove > 0 ? (float)Love / maxLove : 0f;
+        float needFlowers = Mathf.Clamp01(1f - flowerRatio);
+        float needKiss = Mathf.Clamp01(1f - loveRatio);
 
-        var mat = bullet.GetComponent<Renderer>()?.material;
-        if (mat != null)
-            mat.color = Color.black;
+        // access: ближе цель -> больше access
+        float distFlower = GetNearestFlower(out _, out float dF) ? dF : 999f;
+        float distJack = GetDistanceToJack(out _);
+        float accessFlowers = DistanceToAccess(distFlower);
+        float accessKiss = DistanceToAccess(distJack);
 
-        var rb = bullet.AddComponent<Rigidbody>();
-        rb.useGravity = false;
-        var col = bullet.GetComponent<Collider>();
-        if (col != null)
-            col.isTrigger = true;
+        float stickFlowers = currentOpt == 0 ? 1f : 0f;
+        float stickKiss = currentOpt == 1 ? 1f : 0f;
 
-        var bulletScript = bullet.AddComponent<LilyBullet>();
-        var jackAgent = jackTarget != null ? jackTarget.GetComponent<AgentGoToHouseDiscrete>() : null;
-        bulletScript.Init(transform.forward, jackTarget, jackAgent, bulletDamage, bulletSpeed, this, zombieLayer, jackLayer);
+        float eps0 = Random.Range(-noise, noise);
+        float eps1 = Random.Range(-noise, noise);
+
+        float u0 = 2.5f * needFlowers + 1.0f * accessFlowers + stickinessBonus * stickFlowers + eps0;
+        float u1 = 2.5f * needKiss + 1.0f * accessKiss + stickinessBonus * stickKiss + eps1;
+
+        return SoftmaxSample2(u0, u1, Mathf.Max(0.0001f, tau));
+    }
+
+    private float DistanceToAccess(float distance)
+    {
+        if (float.IsNaN(distance) || float.IsInfinity(distance)) return 0f;
+        if (accessMaxDistance <= 0.0001f) return 0f;
+        float t = Mathf.Clamp01(distance / accessMaxDistance);
+        return 1f - t;
+    }
+
+    private static int SoftmaxSample2(float u0, float u1, float temperature)
+    {
+        float a0 = u0 / temperature;
+        float a1 = u1 / temperature;
+        float m = Mathf.Max(a0, a1);
+        float e0 = Mathf.Exp(a0 - m);
+        float e1 = Mathf.Exp(a1 - m);
+        float p0 = e0 / (e0 + e1);
+        return Random.value < p0 ? 0 : 1;
     }
 
     private static float HarvestReachDistance(Vector3 from, Collider c)
@@ -633,8 +611,7 @@ public class LilyScript : Agent, IHasHp
         var d = actionsOut.DiscreteActions;
         int moveAction = 1;
         int rotateAction = 1;
-        int collectAction = Input.GetMouseButton(0) ? 1 : 0;  // ЛКМ — действие DO (собрать/поцеловать)
-        int shootAction = Input.GetMouseButton(1) ? 1 : 0;     // ПКМ — выстрел
+        int collectAction = Input.GetMouseButton(1) ? 1 : 0;  // ПКМ — действие DO (собрать/поцеловать)
 
         // Только стрелки управляют движением (при любой опции; без авто-движения к Джеку)
         if (Input.GetKey(KeyCode.UpArrow)) moveAction = 2;
@@ -645,6 +622,5 @@ public class LilyScript : Agent, IHasHp
         d[0] = moveAction;
         d[1] = rotateAction;
         d[2] = collectAction;
-        d[3] = shootAction;
     }
 }

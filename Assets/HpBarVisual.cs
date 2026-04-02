@@ -6,7 +6,7 @@ using UnityEngine;
 /// </summary>
 public class HpBarVisual : MonoBehaviour
 {
-    [Tooltip("Высота полоски над персонажем. Установите выше displayHeight OptionSelectorAgent (2.5), чтобы полоска была над надписью.")]
+    [Tooltip("Высота полоски над персонажем. Подбирается под надписи/иконки над головой.")]
     [SerializeField] private float heightAbove = 2.9f;
     [SerializeField] private float barWidth = 2f;
     [SerializeField] private float barHeight = 0.25f;
@@ -16,12 +16,20 @@ public class HpBarVisual : MonoBehaviour
     private IHasHp source;
     private Transform barPivot;
     private Transform fillTransform;
+    private Renderer bgRenderer;
+    private Renderer fillRenderer;
     private float currentT = 1f;
     private float tVelocity;
 
     [Header("Smoothing")]
     [Tooltip("Сколько секунд занимает сглаживание изменения HP (0 = без сглаживания).")]
     [SerializeField] private float smoothTimeSeconds = 0.12f;
+
+    [Header("Rendering")]
+    [Tooltip("Sorting order for background (fill uses +1). Helps avoid z-fighting / color smearing.")]
+    [SerializeField] private int sortingOrder = 200;
+    [Tooltip("Насколько заливка ближе к камере относительно фона (в локальном Z).")]
+    [SerializeField] private float fillZOffset = -0.01f;
 
     private void Start()
     {
@@ -40,24 +48,38 @@ public class HpBarVisual : MonoBehaviour
         barPivot.localRotation = Quaternion.identity;
         barPivot.localScale = Vector3.one;
 
-        // Фон — Quad в плоскости XZ (горизонтальная полоска сверху)
+        // Фон — Quad, всегда повернут к камере (billboard).
         GameObject bgGo = GameObject.CreatePrimitive(PrimitiveType.Quad);
         bgGo.name = "HpBarBg";
         bgGo.transform.SetParent(barPivot);
         bgGo.transform.localPosition = Vector3.zero;
-        bgGo.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        bgGo.transform.localRotation = Quaternion.identity;
         bgGo.transform.localScale = new Vector3(barWidth, barHeight, 1f);
         ApplyColor(bgGo, backgroundColor);
         Destroy(bgGo.GetComponent<Collider>());
+        bgRenderer = bgGo.GetComponent<Renderer>();
+        if (bgRenderer != null)
+        {
+            bgRenderer.sortingOrder = sortingOrder;
+            bgRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            bgRenderer.receiveShadows = false;
+        }
 
         // Заливка — масштаб по hp/maxHp, выравнивание по левому краю
         GameObject fillGo = GameObject.CreatePrimitive(PrimitiveType.Quad);
         fillGo.name = "HpBarFill";
         fillTransform = fillGo.transform;
         fillTransform.SetParent(barPivot);
-        fillTransform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        fillTransform.localRotation = Quaternion.identity;
         ApplyColor(fillGo, fillColor);
         Destroy(fillGo.GetComponent<Collider>());
+        fillRenderer = fillGo.GetComponent<Renderer>();
+        if (fillRenderer != null)
+        {
+            fillRenderer.sortingOrder = sortingOrder + 1;
+            fillRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            fillRenderer.receiveShadows = false;
+        }
 
         UpdateBar();
     }
@@ -75,18 +97,11 @@ public class HpBarVisual : MonoBehaviour
     private void LateUpdate()
     {
         if (source == null || fillTransform == null) return;
-        // Биллборд: полоска всегда повёрнута к камере, остаётся вертикальной (не заваливается)
+        // Биллборд: полоска всегда повёрнута к камере.
         if (Camera.main != null)
         {
-            Vector3 barPos = barPivot.position;
-            Vector3 camPos = Camera.main.transform.position;
-            Vector3 dir = camPos - barPos;
-            dir.y = 0f;
-            if (dir.sqrMagnitude > 0.0001f)
-            {
-                barPivot.rotation = Quaternion.LookRotation(dir.normalized);
-            }
-            // Если камера почти сверху — сохраняем последнюю валидную ротацию
+            // Копируем ротацию камеры: самый стабильный и читаемый вариант для UI-полосок.
+            barPivot.rotation = Camera.main.transform.rotation;
         }
         UpdateBar();
     }
@@ -103,6 +118,6 @@ public class HpBarVisual : MonoBehaviour
 
         float w = barWidth * currentT;
         fillTransform.localScale = new Vector3(w, barHeight, 1f);
-        fillTransform.localPosition = new Vector3(-(barWidth - w) * 0.5f, 0f, 0.02f);
+        fillTransform.localPosition = new Vector3(-(barWidth - w) * 0.5f, 0f, fillZOffset);
     }
 }

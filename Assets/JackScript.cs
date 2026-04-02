@@ -16,8 +16,17 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
     [SerializeField] private SheepSpawner sheepSpawner;
 
-    [Header("HRL - Option Selector")]
-    [SerializeField] private OptionSelectorAgent optionSelectorAgent;
+    [Header("Option Sampling (Wood/Food)")]
+    [Tooltip("Если true, опция (дерево/еда) выбирается по utility+softmax sampling каждые 20 шагов.")]
+    [SerializeField] private bool useUtilitySoftmaxSampling = false;
+    [Tooltip("Температура softmax (0.2 = почти жёстко, 0.7 = заметно случайно).")]
+    [SerializeField] [Range(0.05f, 2.0f)] private float tau = 0.2f;
+    [Tooltip("Шум eps ~ Uniform[-noise, +noise], добавляется в utility.")]
+    [SerializeField] [Range(0f, 2f)] private float noise = 0.15f;
+    [Tooltip("Макс. дистанция для access (в метрах). Ближе = 1, дальше = 0.")]
+    [SerializeField] [Range(1f, 100f)] private float accessMaxDistance = 20f;
+    [Tooltip("Липкость: насколько выгодно не переключаться без причины (добавка к utility текущей опции).")]
+    [SerializeField] [Range(0f, 2f)] private float stickinessBonus = 0.5f;
 
     [Header("Current Option Icon")]
     [SerializeField] private SpriteRenderer optionIconRenderer;
@@ -96,7 +105,7 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
     public int currentOption = 1; // 0 = дерево, 1 = еда
 
-    // Публичные свойства для OptionSelectorAgent
+    // Публичные свойства (используются для наблюдений/утилит)
     public int maxWoodPublic => maxWood;
     public int maxHeatPublic => maxHeat;
     public int maxSatietyPublic => maxSatiety;
@@ -271,31 +280,19 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
         hp = maxHp;
 
-        // Устанавливаем опцию в зависимости от наличия OptionSelectorAgent
-        if (optionSelectorAgent != null)
+        // Выбор опции: либо utility+softmax, либо случайно
+        if (useUtilitySoftmaxSampling)
         {
-            // Если OptionSelectorAgent есть, опция будет установлена через SetOption() из его OnEpisodeBegin
-            // НЕ устанавливаем опцию здесь, чтобы не перезаписать опцию, установленную OptionSelectorAgent
-            // Но если опция еще не установлена (например, если наш OnEpisodeBegin вызвался раньше),
-            // используем текущую опцию или случайную
-            if (currentOptionTrain != 0 && currentOptionTrain != 1)
-            {
-                // Если опция некорректна, устанавливаем случайную
-                int randomOption = Random.Range(0, 2);
-                currentOptionTrain = randomOption;
-                currentOption = randomOption;
-            }
+            int sampled = SampleOptionUtilitySoftmax(currentOptionTrain);
+            currentOptionTrain = sampled;
+            currentOption = sampled;
         }
         else
         {
-            // Если OptionSelectorAgent нет - случайный выбор задачи для обучения: 0 = дерево, 1 = еда
             int randomOption = Random.Range(0, 2);
             currentOptionTrain = randomOption;
             currentOption = randomOption;
         }
-        
-        // Финальная синхронизация
-        currentOption = currentOptionTrain;
         UpdateOptionIconVisual();
 
         lastRewardForOption0 = 0f;
@@ -350,17 +347,11 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         return false;
     }
 
-    /// <summary>
-    /// Публичный метод для OptionSelectorAgent - проверяет наличие деревьев поблизости
-    /// </summary>
     public bool HasTreesNearby()
     {
         return IsTreeNearby();
     }
 
-    /// <summary>
-    /// Публичный метод для OptionSelectorAgent - проверяет наличие овец поблизости
-    /// </summary>
     public bool HasSheepNearby()
     {
         float r = eatDistance * 2f;
@@ -375,9 +366,6 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         return false;
     }
 
-    /// <summary>
-    /// Получить расстояние до ближайшей овечки (для OptionSelectorAgent)
-    /// </summary>
     public float GetDistanceToNearestSheep()
     {
         if (GetNearestSheep(out GameObject sheep, out float distance))
@@ -387,9 +375,6 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         return 999f; // большое значение, если овец нет
     }
 
-    /// <summary>
-    /// Получить расстояние до ближайшего дерева (для OptionSelectorAgent)
-    /// </summary>
     public float GetDistanceToNearestTree()
     {
         if (GetNearestTree(out GameObject tree, out float distance))
@@ -399,9 +384,6 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         return 999f; // большое значение, если деревьев нет
     }
 
-    /// <summary>
-    /// Устанавливает опцию от OptionSelectorAgent
-    /// </summary>
     public void SetOption(int option)
     {
         // Проверяем валидность опции
@@ -615,22 +597,14 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
     public override void OnActionReceived(ActionBuffers actions)
     {
-        // Дополнительная проверка: если OptionSelectorAgent есть, синхронизируем опцию на первом шаге
-        // Это защита на случай, если OnEpisodeBegin вызывался в неправильном порядке
-        if (optionSelectorAgent != null && stepCount == 0)
+        // Utility sampling: пересэмпливаем каждые 20 шагов (если включено)
+        if (useUtilitySoftmaxSampling && stepCount > 0 && (stepCount % 20) == 0)
         {
-            int optionFromSelector = optionSelectorAgent.GetSelectedOption();
-            if (optionFromSelector == 0 || optionFromSelector == 1)
-            {
-                if (currentOptionTrain != optionFromSelector)
-                {
-                    Debug.LogWarning($"AgentGoToHouseDiscrete: Опция не синхронизирована в начале! Исправляем: {currentOptionTrain} -> {optionFromSelector}");
-                    currentOptionTrain = optionFromSelector;
-                    currentOption = optionFromSelector;
-                }
-            }
+            int sampled = SampleOptionUtilitySoftmax(currentOptionTrain);
+            currentOptionTrain = sampled;
+            currentOption = sampled;
+            UpdateOptionIconVisual();
         }
-        // Если OptionSelectorAgent нет - опция уже установлена случайно в OnEpisodeBegin
         
         int moveAction = actions.DiscreteActions[0];
         int rotateAction = actions.DiscreteActions[1];
@@ -856,11 +830,7 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
                     accumulatedRewardForOption0 += reward;
                     lastRewardForOption0 = accumulatedRewardForOption0;
 
-                    // Уведомляем OptionSelectorAgent о успешном выполнении задачи
-                    if (optionSelectorAgent != null)
-                    {
-                        optionSelectorAgent.OnTaskCompleted(0, reward);
-                    }
+                    // Раньше тут уведомляли внешний селектор опций (HRL) — теперь выбор встроен в JackScript.
                 }
             }
         }
@@ -886,27 +856,53 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
             var statsRecorder = Academy.Instance.StatsRecorder;
             statsRecorder.Add("collision", 0.0f);
             
-            // Уведомляем OptionSelectorAgent о завершении эпизода
-            // Важно: OptionSelectorAgent должен завершить эпизод синхронно с LowLevelAgent
-            // чтобы ML-Agents мог правильно логировать статистику
-            if (optionSelectorAgent != null)
-            {
-                // Вызываем EndEpisode для OptionSelectorAgent перед завершением нашего эпизода
-                // Это гарантирует синхронизацию завершения эпизодов
-                optionSelectorAgent.EndEpisode();
-            }
-            
             EvalEpisodeTracker.NotifyEpisodeEnded();
             EndEpisode();
         }
 
-        // Уведомляем OptionSelectorAgent о награде за шаг (если используется HRL)
-        if (optionSelectorAgent != null && currentStepReward != 0f)
-        {
-            // Награда уже добавлена, просто обновляем отслеживание
-        }
-
         _lastChopActionForAnim = chopAction;
+    }
+
+    private int SampleOptionUtilitySoftmax(int currentOpt)
+    {
+        float woodRatio = maxWood > 0 ? (float)wood / maxWood : 0f;
+        float satietyRatio = maxSatiety > 0 ? (float)satiety / maxSatiety : 0f;
+
+        float needWood = Mathf.Clamp01(1f - woodRatio);
+        float needFood = Mathf.Clamp01(1f - satietyRatio);
+
+        float accessWood = DistanceToAccess(GetDistanceToNearestTree());
+        float accessFood = DistanceToAccess(GetDistanceToNearestSheep());
+
+        float stickWood = currentOpt == 0 ? 1f : 0f;
+        float stickFood = currentOpt == 1 ? 1f : 0f;
+
+        float epsWood = Random.Range(-noise, noise);
+        float epsFood = Random.Range(-noise, noise);
+
+        float uWood = 2.5f * needWood + 1.0f * accessWood + stickinessBonus * stickWood + epsWood;
+        float uFood = 2.5f * needFood + 1.0f * accessFood + stickinessBonus * stickFood + epsFood;
+
+        return SoftmaxSample2(uWood, uFood, Mathf.Max(0.0001f, tau));
+    }
+
+    private float DistanceToAccess(float distance)
+    {
+        if (float.IsNaN(distance) || float.IsInfinity(distance)) return 0f;
+        if (accessMaxDistance <= 0.0001f) return 0f;
+        float t = Mathf.Clamp01(distance / accessMaxDistance);
+        return 1f - t;
+    }
+
+    private static int SoftmaxSample2(float u0, float u1, float temperature)
+    {
+        float a0 = u0 / temperature;
+        float a1 = u1 / temperature;
+        float m = Mathf.Max(a0, a1);
+        float e0 = Mathf.Exp(a0 - m);
+        float e1 = Mathf.Exp(a1 - m);
+        float p0 = e0 / (e0 + e1);
+        return Random.value < p0 ? 0 : 1;
     }
 
     private bool IsZombieNearbyForDo()

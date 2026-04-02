@@ -51,7 +51,6 @@ public class LilyBullet : MonoBehaviour
         if (zombieHealth != null)
         {
             zombieHealth.TakeDamage(damage, transform.position);
-            lilyAgent?.OnBulletHitZombie();
             Destroy(gameObject);
             return;
         }
@@ -69,7 +68,6 @@ public class LilyBullet : MonoBehaviour
         {
             if (jackAgent != null)
                 jackAgent.TakeDamage(damage);
-            lilyAgent?.OnBulletHitJack();
             Destroy(gameObject);
         }
     }

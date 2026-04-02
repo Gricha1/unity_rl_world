@@ -44,6 +44,10 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
     private float _startRealtime = -1f;
     private Camera _cameraA;
     private Camera _cameraB;
+    private Camera _thirdPersonCameraB;
+    private Transform _jackTarget;
+    private Vector3 _thirdPersonOffset = new Vector3(0f, 2.2f, -4.5f);
+    private Vector3 _thirdPersonLookAtOffset = new Vector3(0f, 1.2f, 0f);
     private Texture2D _captureTexture;
     private RenderTexture _captureRt;
 
@@ -114,6 +118,10 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
     private void Update()
     {
         if (_startRealtime < 0f) _startRealtime = Time.realtimeSinceStartup;
+
+        // If we need a 2nd camera capture, ensure a 3rd-person Jack camera exists.
+        if (!string.IsNullOrWhiteSpace(_captureDirB))
+            EnsureJackThirdPersonCameraB();
 
         if (!string.IsNullOrWhiteSpace(_captureDir) || !string.IsNullOrWhiteSpace(_captureDirB))
         {
@@ -219,6 +227,54 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         {
             if (_cameraB != null)
                 CaptureCameraToPng(_cameraB, _captureDirB, ref _frameIndexB);
+        }
+    }
+
+    private void EnsureJackThirdPersonCameraB()
+    {
+        // If a named camera B was requested and exists, don't override it.
+        if (!string.IsNullOrWhiteSpace(_cameraBName))
+        {
+            if (_cameraB != null) return;
+            ResolveCameras();
+            if (_cameraB != null) return;
+        }
+
+        if (_thirdPersonCameraB == null)
+        {
+            var go = GameObject.Find("JackThirdPersonCamera");
+            if (go == null)
+                go = new GameObject("JackThirdPersonCamera");
+
+            _thirdPersonCameraB = go.GetComponent<Camera>();
+            if (_thirdPersonCameraB == null)
+                _thirdPersonCameraB = go.AddComponent<Camera>();
+
+            // Make sure it's enabled for Render() and doesn't interfere with the main view.
+            _thirdPersonCameraB.enabled = true;
+            _thirdPersonCameraB.depth = -100; // keep it out of the main stack ordering
+            _thirdPersonCameraB.clearFlags = CameraClearFlags.Skybox;
+
+            _cameraB = _thirdPersonCameraB;
+        }
+
+        if (_jackTarget == null)
+        {
+            AgentGoToHouseDiscrete jack;
+#if UNITY_2023_1_OR_NEWER
+            jack = FindAnyObjectByType<AgentGoToHouseDiscrete>();
+#else
+            jack = FindObjectOfType<AgentGoToHouseDiscrete>();
+#endif
+            if (jack != null) _jackTarget = jack.transform;
+        }
+
+        if (_jackTarget != null)
+        {
+            // Place camera behind Jack in Jack's local space.
+            _thirdPersonCameraB.transform.position = _jackTarget.TransformPoint(_thirdPersonOffset);
+            var lookAt = _jackTarget.TransformPoint(_thirdPersonLookAtOffset);
+            _thirdPersonCameraB.transform.rotation = Quaternion.LookRotation(lookAt - _thirdPersonCameraB.transform.position, Vector3.up);
         }
     }
 
