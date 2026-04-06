@@ -16,6 +16,10 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
     [SerializeField] private SheepSpawner sheepSpawner;
 
+    [Header("HUD")]
+    [Tooltip("Показывать HUD HP (левый верхний угол) для Jack/Lily. Выключи, чтобы полностью убрать этот HUD до Play.")]
+    [SerializeField] private bool showHudHpTopLeft = true;
+
     [Header("Option Sampling (Wood/Food)")]
     [Tooltip("Если true, опция (дерево/еда) выбирается по utility+softmax sampling каждые 20 шагов.")]
     [SerializeField] private bool useUtilitySoftmaxSampling = false;
@@ -37,6 +41,8 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
     [SerializeField] private float optionFoodIconScale = 0.35f;
     [SerializeField] private int optionIconSortingOrder = 100;
     [SerializeField] private bool optionIconFaceCamera = true;
+    [Tooltip("Если задано — иконка разворачивается к этой камере; иначе MainCamera или камера с максимальным depth.")]
+    [SerializeField] private Camera optionIconBillboardCamera;
     [Tooltip("Снять галочку, чтобы скрыть спрайт задачи (дерево/еда) над агентом.")]
     [SerializeField] private bool showOptionTaskIcon = true;
 
@@ -136,8 +142,11 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
     [SerializeField] private string doActionAnimTrigger = "Do";
     [Tooltip("Минимум секунд между срабатываниями DO (анимация + попытка добычи).")]
     [SerializeField] private float doActionCooldownSeconds = 0.45f;
+    [Tooltip("Сглаживание параметра Speed в Animator (0 = без сглаживания — быстрее включение walk).")]
+    [SerializeField] private float walkAnimSpeedDamp = 0f;
     private int _lastChopActionForAnim;
     private float _doCooldownRemaining;
+    private float _lastPlanarMoveInput;
 
     [Header("DO vs Zombie")]
     [Tooltip("Если при выполнении DO рядом есть зомби — агент получает урон.")]
@@ -189,6 +198,12 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
         EnsureOptionIconRenderer();
         UpdateOptionIconVisual();
+    }
+
+    private void Awake()
+    {
+        // Нужно выставить до HudHpBars.Bootstrap (AfterSceneLoad), чтобы HUD вообще не создавался.
+        HudHpBars.SetGlobalEnabled(showHudHpTopLeft);
     }
 
     private void EnsureOptionIconRenderer()
@@ -407,17 +422,40 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
     private void LateUpdate()
     {
+        ApplyWalkAnimatorSpeed();
+
         if (!showOptionTaskIcon || optionIconRenderer == null) return;
 
-        optionIconRenderer.transform.position = transform.position + optionIconOffset;
+        Vector3 iconPos = transform.position + optionIconOffset;
+        optionIconRenderer.transform.position = iconPos;
 
-        if (optionIconFaceCamera && Camera.main != null)
+        if (optionIconFaceCamera)
         {
-            // Billboard icon toward camera for readability.
-            var camForward = Camera.main.transform.forward;
-            if (camForward.sqrMagnitude > 0.0001f)
-                optionIconRenderer.transform.rotation = Quaternion.LookRotation(camForward);
+            var cam = BillboardIconCamera.Resolve(iconPos, optionIconBillboardCamera);
+            if (cam != null)
+            {
+                Vector3 toCam = cam.transform.position - iconPos;
+                if (toCam.sqrMagnitude > 1e-6f)
+                    optionIconRenderer.transform.rotation = Quaternion.LookRotation(toCam.normalized, cam.transform.up);
+            }
         }
+    }
+
+    private void ApplyWalkAnimatorSpeed()
+    {
+        if (animator == null || controller == null) return;
+
+        Vector3 v = controller.velocity;
+        v.y = 0f;
+        float velNorm = moveSpeed > 1e-4f ? Mathf.Clamp01(v.magnitude / moveSpeed) : 0f;
+        float target = Mathf.Max(Mathf.Abs(_lastPlanarMoveInput), velNorm);
+        if (target < 0.02f)
+            target = 0f;
+
+        if (walkAnimSpeedDamp > 0f)
+            animator.SetFloat("Speed", target, walkAnimSpeedDamp, Time.deltaTime);
+        else
+            animator.SetFloat("Speed", target);
     }
 
     private void UpdateOptionIconVisual()
@@ -647,8 +685,7 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
         controller.Move(move * Time.deltaTime);
 
-        // --- Анимация ---
-        animator.SetFloat("Speed", Mathf.Abs(moveInput));
+        _lastPlanarMoveInput = moveInput;
 
         // --- Reward: прогресс к дому ---
         float prevDist = Vector3.Distance(prevPosition, houseTarget.position);
@@ -660,6 +697,7 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         int currentOptionSnapshot = currentOptionTrain;
 
         bool choppedTree = false;
+        bool gainedWoodFromChop = false;
         bool ateSheep = false;
 
         if (doReady)
@@ -671,7 +709,7 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
                 KnockbackNearbyZombiesOnDo();
 
             if (currentOptionSnapshot == 0)
-                choppedTree = TryChopTree();
+                choppedTree = TryChopTree(out gainedWoodFromChop);
             else if (currentOptionSnapshot == 1)
                 ateSheep = TryEatSheep();
 
@@ -680,7 +718,8 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         
         // Reward за рубку дерева - только если опция = дерево (0)
         // Используем snapshot опции для защиты от изменения во время выполнения
-        if (choppedTree && currentOptionSnapshot == 0)
+        // Награждаем только если реально добыли дерево (а не просто сломали при полном инвентаре).
+        if (choppedTree && gainedWoodFromChop && currentOptionSnapshot == 0)
         {
             float reward = 10.0f;
             AddReward(reward);
@@ -865,10 +904,10 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
     private int SampleOptionUtilitySoftmax(int currentOpt)
     {
-        float woodRatio = maxWood > 0 ? (float)wood / maxWood : 0f;
+        float heatRatio = maxHeat > 0 ? (float)heat / maxHeat : 0f;
         float satietyRatio = maxSatiety > 0 ? (float)satiety / maxSatiety : 0f;
 
-        float needWood = Mathf.Clamp01(1f - woodRatio);
+        float needHeat = Mathf.Clamp01(1f - heatRatio);
         float needFood = Mathf.Clamp01(1f - satietyRatio);
 
         float accessWood = DistanceToAccess(GetDistanceToNearestTree());
@@ -880,7 +919,9 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         float epsWood = Random.Range(-noise, noise);
         float epsFood = Random.Range(-noise, noise);
 
-        float uWood = 2.5f * needWood + 1.0f * accessWood + stickinessBonus * stickWood + epsWood;
+        // 0 = дерево (лес): основной драйвер — потребность в тепле.
+        // 1 = еда: основной драйвер — потребность в еде (сытости).
+        float uWood = 2.5f * needHeat + 1.0f * accessWood + stickinessBonus * stickWood + epsWood;
         float uFood = 2.5f * needFood + 1.0f * accessFood + stickinessBonus * stickFood + epsFood;
 
         return SoftmaxSample2(uWood, uFood, Mathf.Max(0.0001f, tau));
@@ -1024,10 +1065,9 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         }
     }
 
-    private bool TryChopTree()
+    private bool TryChopTree(out bool gainedWood)
     {
-        if (wood >= maxWood)
-            return false;
+        gainedWood = false;
 
         Vector3 origin = transform.position;
         Collider[] hits = Physics.OverlapSphere(origin, chopDistance, treeLayer);
@@ -1050,7 +1090,13 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         if (bestRoot == null)
             return false;
 
-        wood++;
+        // Если инвентарь полон — дерево всё равно можно "сломать",
+        // но ресурс не добавляем.
+        if (wood < maxWood)
+        {
+            wood++;
+            gainedWood = true;
+        }
         Destroy(bestRoot);
         return true;
     }

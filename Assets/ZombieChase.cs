@@ -17,11 +17,16 @@ public class ZombieChase : MonoBehaviour
     [Header("Gravity")]
     [SerializeField] private float gravity = -9.81f;
 
+    [Header("Animation")]
+    [Tooltip("Сглаживание Speed в Animator (0 = выкл).")]
+    [SerializeField] private float walkAnimSpeedDamp = 0f;
+
     private CharacterController controller;
     private Rigidbody rb;
     private Animator animator;
     private float verticalVelocity;
     private bool useRigidbody;
+    private float _walkAnimIntent;
 
     [Header("Stun / Freeze")]
     [Tooltip("Время, до которого зомби не может двигаться (устанавливается через Stun).")]
@@ -78,16 +83,14 @@ public class ZombieChase : MonoBehaviour
     {
         if (Time.time < stunnedUntilTime)
         {
-            if (animator != null)
-                animator.SetFloat("Speed", 0f);
+            _walkAnimIntent = 0f;
             return;
         }
 
         Transform target = GetClosestTarget();
         if (target == null)
         {
-            if (animator != null)
-                animator.SetFloat("Speed", 0f);
+            _walkAnimIntent = 0f;
             return;
         }
 
@@ -98,16 +101,12 @@ public class ZombieChase : MonoBehaviour
 
         if (delta.sqrMagnitude < 0.001f)
         {
-            if (animator != null)
-                animator.SetFloat("Speed", 0f);
+            _walkAnimIntent = 0f;
             return;
         }
 
         Vector3 dir = delta.normalized;
-
-        // Анимация ходьбы (тот же параметр "Speed", что у Jack и Lily)
-        if (animator != null)
-            animator.SetFloat("Speed", 1f);
+        _walkAnimIntent = 1f;
 
         // Поворот в сторону цели
         Quaternion targetRot = Quaternion.LookRotation(dir);
@@ -133,7 +132,6 @@ public class ZombieChase : MonoBehaviour
         if (rb == null || !useRigidbody) return;
         if (Time.time < stunnedUntilTime)
         {
-            // Останавливаем Rigidbody зомби на время стана
             rb.linearVelocity = Vector3.zero;
             return;
         }
@@ -149,6 +147,47 @@ public class ZombieChase : MonoBehaviour
         vel.y = rb.linearVelocity.y + gravity * Time.fixedDeltaTime;
         if (vel.y < -20f) vel.y = -20f;
         rb.linearVelocity = vel;
+    }
+
+    private void LateUpdate()
+    {
+        ApplyWalkAnimatorSpeed();
+    }
+
+    private void ApplyWalkAnimatorSpeed()
+    {
+        if (animator == null) return;
+
+        if (Time.time < stunnedUntilTime)
+        {
+            animator.SetFloat("Speed", 0f);
+            return;
+        }
+
+        float target = _walkAnimIntent;
+
+        if (controller != null)
+        {
+            Vector3 v = controller.velocity;
+            v.y = 0f;
+            float velNorm = moveSpeed > 1e-4f ? Mathf.Clamp01(v.magnitude / moveSpeed) : 0f;
+            target = Mathf.Max(target, velNorm);
+        }
+        else if (useRigidbody && rb != null)
+        {
+            Vector3 v = rb.linearVelocity;
+            v.y = 0f;
+            float velNorm = moveSpeed > 1e-4f ? Mathf.Clamp01(v.magnitude / moveSpeed) : 0f;
+            target = Mathf.Max(target, velNorm);
+        }
+
+        if (target < 0.02f)
+            target = 0f;
+
+        if (walkAnimSpeedDamp > 0f)
+            animator.SetFloat("Speed", target, walkAnimSpeedDamp, Time.deltaTime);
+        else
+            animator.SetFloat("Speed", target);
     }
 
     /// <summary>Ближайшая цель по горизонтали (XZ).</summary>

@@ -12,11 +12,32 @@ set -o pipefail
 #
 # Notes:
 # - Detects checkpoints by scanning results/<run_id>/*/*-<steps>.onnx
-# - Captures PNG sequences into: results/<run_id>/videos/step_<N>/ and step_<N>_jack3p/
-# - If ffmpeg is installed, also produces: results/<run_id>/videos/step_<N>.mp4 and step_<N>_jack3p.mp4
+# - Все настройки захвата/ffmpeg — в блоке «ПАРАМЕТРЫ» ниже (не через export / окружение).
+# - Captures PNG sequences into:
+#     results/<run_id>/videos/step_<N>_camA/
+#     results/<run_id>/videos/step_<N>_camB/
+#     results/<run_id>/videos/step_<N>_jack_overhead/
+# - If ffmpeg is installed, also produces 3 mp4 files with the same suffixes.
 
 cd "$(dirname "$0")"
 cd ..
+
+# ========== ПАРАМЕТРЫ (правь здесь; не через export) ==========
+FORCE_XVFB=1
+CAPTURE_EVERY=1
+CAPTURE_WIDTH=1920
+CAPTURE_HEIGHT=1080
+CAPTURE_MSAA=4
+QUIT_AFTER_SECONDS=240
+QUIT_AFTER_EPISODES=0
+QUIT_DELAY_SECONDS=0.5
+MAX_EVAL_SECONDS=600
+CAPTURE_USE_META_FPS=1
+CAPTURE_VIDEO_FPS=24
+FFMPEG_CRF=18
+FFMPEG_PRESET=medium
+EVAL_EVERY_STEPS_DEFAULT=100000
+# ==============================================================
 
 if [ -z "${1:-}" ] || [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
   echo "Usage: bash train_scripts/validate_video_watcher_fixed.bash <env_build_name> <run_id> <config_name> [eval_every_steps]"
@@ -26,9 +47,7 @@ fi
 ENV_BUILD_NAME="$1"
 RUN_ID="$2"
 CONFIG_NAME="$3"
-EVAL_EVERY_STEPS="${4:-100000}"
-
-FORCE_XVFB="${FORCE_XVFB:-1}"
+EVAL_EVERY_STEPS="${4:-$EVAL_EVERY_STEPS_DEFAULT}"
 
 BUILD_PATH="build_versions/${ENV_BUILD_NAME}"
 RESULTS_DIR="results/${RUN_ID}"
@@ -93,15 +112,14 @@ write_last_encoded_step() {
 
 already_encoded_target() {
   local step="$1"
-  local step_di="${VIDEO_ROOT}/step_${step}"
-  local mp4="${VIDEO_ROOT}/step_${step}.mp4"
-  if [ -f "${mp4}" ]; then
+  local mp4a="${VIDEO_ROOT}/step_${step}_camA.mp4"
+  local mp4b="${VIDEO_ROOT}/step_${step}_camB.mp4"
+  local mp4c="${VIDEO_ROOT}/step_${step}_jack_overhead.mp4"
+  if [ -f "${mp4a}" ] && [ -f "${mp4b}" ] && [ -f "${mp4c}" ]; then
     return 0
   fi
-  if [ -f "${step_di}/capture_started.txt" ]; then
-    return 0
-  fi
-  if [ -d "${step_di}" ] && ls "${step_di}"/frame_*.png >/dev/null 2>&1; then
+  # If any capture started, we consider it in-progress/done for this step to avoid duplicates.
+  if [ -f "${VIDEO_ROOT}/step_${step}_camA/capture_started.txt" ] || [ -f "${VIDEO_ROOT}/step_${step}_camB/capture_started.txt" ] || [ -f "${VIDEO_ROOT}/step_${step}_jack_overhead/capture_started.txt" ]; then
     return 0
   fi
   return 1
@@ -112,21 +130,33 @@ run_eval_for_step() {
   local pot
   pot="$(pick_free_port)"
 
-  local step_di="${VIDEO_ROOT}/step_${step}"
-  local step_di_b="${VIDEO_ROOT}/step_${step}_jack3p"
+  local step_di_a="${VIDEO_ROOT}/step_${step}_camA"
+  local step_di_b="${VIDEO_ROOT}/step_${step}_camB"
+  local step_di_c="${VIDEO_ROOT}/step_${step}_jack_overhead"
   # Make absolute paths for Unity (relative paths depend on its working directory).
   if command -v realpath >/dev/null 2>&1; then
-    step_di="$(realpath "${step_di}")"
+    step_di_a="$(realpath "${step_di_a}")"
     step_di_b="$(realpath "${step_di_b}")"
+    step_di_c="$(realpath "${step_di_c}")"
   fi
-  mkdir -p "${step_di}"
+  mkdir -p "${step_di_a}"
   mkdir -p "${step_di_b}"
+  mkdir -p "${step_di_c}"
 
-  local quit_after_episodes="2"
-  local capture_every="3"
-  local quit_after_seconds="${QUIT_AFTER_SECONDS:-180}"
+  echo "[watcher] validate target step=${step} on port=${pot}"
 
-  echo "[watche] validate taget step=${step} on pot=${pot}"
+  local env_args=(
+    --capture-dir "${step_di_a}" --capture-camera-a "CamA"
+    --capture-dir-b "${step_di_b}" --capture-camera-b "CamB"
+    --capture-dir-c "${step_di_c}"
+    --capture-every "${CAPTURE_EVERY}"
+    --capture-width "${CAPTURE_WIDTH}"
+    --capture-height "${CAPTURE_HEIGHT}"
+    --capture-msaa "${CAPTURE_MSAA}"
+    --quit-after-episodes "${QUIT_AFTER_EPISODES}"
+    --quit-after-seconds "${QUIT_AFTER_SECONDS}"
+    --quit-delay-seconds "${QUIT_DELAY_SECONDS}"
+  )
 
   local mlagents_cmd=(mlagents-learn "custom_configs/${CONFIG_NAME}.yaml"
     --inference
@@ -136,33 +166,86 @@ run_eval_for_step() {
     --base-port "${pot}"
     --num-envs 1
     --timeout-wait 600
-    --env-args --capture-dir "${step_di}" --capture-dir-b "${step_di_b}" --capture-every "${capture_every}" --quit-after-episodes "${quit_after_episodes}" --quit-after-seconds "${quit_after_seconds}" --quit-delay-seconds 0.5
+    --env-args "${env_args[@]}"
   )
-
-  local max_eval_seconds="${MAX_EVAL_SECONDS:-600}"
 
   if [ "${FORCE_XVFB}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
     echo "[watcher] running inference under xvfb-run (FORCE_XVFB=1)"
-    timeout --signal=INT "${max_eval_seconds}" xvfb-run -a "${mlagents_cmd[@]}" || true
+    timeout --signal=INT "${MAX_EVAL_SECONDS}" xvfb-run -a "${mlagents_cmd[@]}" || true
   else
     if [ -z "${DISPLAY:-}" ]; then
       echo "[watcher] ERROR: DISPLAY is empty and FORCE_XVFB=0. Cannot render/capture video."
       return 1
     fi
     echo "[watcher] running inference with DISPLAY=${DISPLAY} (FORCE_XVFB=0)"
-    timeout --signal=INT "${max_eval_seconds}" "${mlagents_cmd[@]}" || true
+    timeout --signal=INT "${MAX_EVAL_SECONDS}" "${mlagents_cmd[@]}" || true
   fi
 
-  if command -v ffmpeg >/dev/null 2>&1; then
-    local out_mp4="${VIDEO_ROOT}/step_${step}.mp4"
-    ffmpeg -y -framerate 60 -i "${step_di}/frame_%06d.png" -c:v libx264 -pix_fmt yuv420p "${out_mp4}" >/dev/null 2>&1 || true
-    echo "[watcher] saved ${out_mp4}"
+  ffmpeg_fps_from_meta() {
+    local cap_dir="$1"
+    local meta="${cap_dir}/capture_meta.txt"
+    [ -f "$meta" ] || { echo ""; return; }
+    local wall frames
+    wall=$(grep -E '^wall_seconds=' "$meta" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
+    frames=$(grep -E '^frame_count=' "$meta" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
+    [ -n "$wall" ] && [ -n "$frames" ] || { echo ""; return; }
+    awk -v w="$wall" -v f="$frames" 'BEGIN {
+      if (w > 0.05 && f > 0) {
+        x = f / w
+        if (x > 60) x = 60
+        if (x < 5) x = 5
+        printf "%.6f", x
+      }
+    }'
+  }
 
-    local out_mp4_b="${VIDEO_ROOT}/step_${step}_jack3p.mp4"
-    ffmpeg -y -framerate 60 -i "${step_di_b}/frame_%06d.png" -c:v libx264 -pix_fmt yuv420p "${out_mp4_b}" >/dev/null 2>&1 || true
+  pick_ffmpeg_fps() {
+    local cap_dir="$1"
+    local fps=""
+    if [ "${CAPTURE_USE_META_FPS}" = "1" ]; then
+      fps="$(ffmpeg_fps_from_meta "$cap_dir")"
+    fi
+    if [ -z "$fps" ]; then
+      fps="${CAPTURE_VIDEO_FPS}"
+    fi
+    echo "$fps"
+  }
+
+  if command -v ffmpeg >/dev/null 2>&1; then
+    pick_frame_ext() {
+      local cap_dir="$1"
+      if [ -f "${cap_dir}/frame_000000.jpg" ]; then
+        echo "jpg"
+      else
+        echo "png"
+      fi
+    }
+
+    local ff_fps_a ff_fps_b ff_fps_c
+    ff_fps_a="$(pick_ffmpeg_fps "${step_di_a}")"
+    ff_fps_b="$(pick_ffmpeg_fps "${step_di_b}")"
+    ff_fps_c="$(pick_ffmpeg_fps "${step_di_c}")"
+    echo "[watcher] ffmpeg fps camA=${ff_fps_a} camB=${ff_fps_b} overhead=${ff_fps_c} (meta=${CAPTURE_USE_META_FPS}, fallback=${CAPTURE_VIDEO_FPS})"
+
+    local ext_a ext_b ext_c
+    ext_a="$(pick_frame_ext "${step_di_a}")"
+    ext_b="$(pick_frame_ext "${step_di_b}")"
+    ext_c="$(pick_frame_ext "${step_di_c}")"
+    echo "[watcher] frame ext camA=${ext_a} camB=${ext_b} overhead=${ext_c}"
+
+    local out_mp4_a="${VIDEO_ROOT}/step_${step}_camA.mp4"
+    ffmpeg -y -framerate "${ff_fps_a}" -i "${step_di_a}/frame_%06d.${ext_a}" -c:v libx264 -pix_fmt yuv420p -crf "${FFMPEG_CRF}" -preset "${FFMPEG_PRESET}" "${out_mp4_a}" >/dev/null 2>&1 || true
+    echo "[watcher] saved ${out_mp4_a}"
+
+    local out_mp4_b="${VIDEO_ROOT}/step_${step}_camB.mp4"
+    ffmpeg -y -framerate "${ff_fps_b}" -i "${step_di_b}/frame_%06d.${ext_b}" -c:v libx264 -pix_fmt yuv420p -crf "${FFMPEG_CRF}" -preset "${FFMPEG_PRESET}" "${out_mp4_b}" >/dev/null 2>&1 || true
     echo "[watcher] saved ${out_mp4_b}"
+
+    local out_mp4_c="${VIDEO_ROOT}/step_${step}_jack_overhead.mp4"
+    ffmpeg -y -framerate "${ff_fps_c}" -i "${step_di_c}/frame_%06d.${ext_c}" -c:v libx264 -pix_fmt yuv420p -crf "${FFMPEG_CRF}" -preset "${FFMPEG_PRESET}" "${out_mp4_c}" >/dev/null 2>&1 || true
+    echo "[watcher] saved ${out_mp4_c}"
   else
-    echo "[watcher] ffmpeg not found; kept PNGs in ${step_di} and ${step_di_b}"
+    echo "[watcher] ffmpeg not found; kept PNGs in ${step_di_a}, ${step_di_b}, ${step_di_c}"
   fi
 }
 

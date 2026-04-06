@@ -8,6 +8,23 @@ using TMPro;
 /// </summary>
 public sealed class HudHpBars : MonoBehaviour
 {
+    [Header("Visibility")]
+    [Tooltip("Если false — HUD полоски HP (Jack/Lily) не рисуются.")]
+    [SerializeField] private bool showHudHpBars = true;
+
+    /// <summary>
+    /// Глобальный переключатель HUD HP (для выключения из JackScript в инспекторе до Play).
+    /// </summary>
+    public static bool GlobalEnabled { get; private set; } = true;
+
+    public static void SetGlobalEnabled(bool enabled)
+    {
+        GlobalEnabled = enabled;
+        var inst = FindObjectOfType<HudHpBars>();
+        if (inst != null)
+            inst.ApplyVisibility();
+    }
+
     [Header("Layout")]
     [SerializeField] private Vector2 padding = new Vector2(16f, 16f);
     [SerializeField] private float topOffset = 36f;
@@ -30,22 +47,50 @@ public sealed class HudHpBars : MonoBehaviour
     private RectTransform _lilyFillRt;
     private TextMeshProUGUI _lilyText;
 
+    private Canvas _canvas;
+
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void Bootstrap()
     {
-        if (FindObjectOfType<HudHpBars>() != null) return;
-        var go = new GameObject(nameof(HudHpBars));
-        DontDestroyOnLoad(go);
-        go.AddComponent<HudHpBars>();
+        if (!GlobalEnabled)
+            return;
+
+        // FindObjectOfType не видит выключенные/неактивные объекты.
+        // Поэтому ищем HudHpBars в загруженных сценах даже если он выключен —
+        // чтобы можно было положить его в сцену ДО Play и управлять showHudHpBars в инспекторе.
+        var all = Resources.FindObjectsOfTypeAll<HudHpBars>();
+        for (int i = 0; i < all.Length; i++)
+        {
+            var h = all[i];
+            if (h == null) continue;
+            var go = h.gameObject;
+            var sc = go.scene;
+            if (sc.IsValid() && sc.isLoaded)
+                return;
+        }
+
+        var runtimeGo = new GameObject(nameof(HudHpBars));
+        DontDestroyOnLoad(runtimeGo);
+        runtimeGo.AddComponent<HudHpBars>();
     }
 
     private void Awake()
     {
-        CreateCanvasAndBars();
+        // Если выключено ещё в инспекторе до Play — вообще не создаём Canvas.
+        if (GlobalEnabled && showHudHpBars)
+            CreateCanvasAndBars();
     }
 
     private void Update()
     {
+        ApplyVisibility();
+        if (!GlobalEnabled || !showHudHpBars)
+            return;
+
+        // Если включили во время Play, а Canvas ещё не создан — создаём лениво.
+        if (_canvas == null)
+            CreateCanvasAndBars();
+
         // Resolve references lazily (agents can spawn after scene load).
         if (_jack == null)
             _jack = FindObjectOfType<AgentGoToHouseDiscrete>();
@@ -54,6 +99,12 @@ public sealed class HudHpBars : MonoBehaviour
 
         UpdateBar(_jack, _jackFillRt, _jackText, "Jack");
         UpdateBar(_lily, _lilyFillRt, _lilyText, "Lily");
+    }
+
+    private void ApplyVisibility()
+    {
+        if (_canvas != null)
+            _canvas.enabled = GlobalEnabled && showHudHpBars;
     }
 
     private void UpdateBar(IHasHp hp, RectTransform fillRt, TextMeshProUGUI label, string name)
@@ -77,9 +128,9 @@ public sealed class HudHpBars : MonoBehaviour
         var canvasGo = new GameObject("HudCanvas");
         canvasGo.transform.SetParent(transform, false);
 
-        var canvas = canvasGo.AddComponent<Canvas>();
-        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        canvas.sortingOrder = 1000;
+        _canvas = canvasGo.AddComponent<Canvas>();
+        _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        _canvas.sortingOrder = 1000;
 
         canvasGo.AddComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         canvasGo.AddComponent<GraphicRaycaster>();

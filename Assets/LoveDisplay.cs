@@ -3,6 +3,8 @@ using TMPro;
 
 public class LoveDisplay : MonoBehaviour
 {
+    [Tooltip("Если false — стикер/счётчик любви не отображается.")]
+    [SerializeField] private bool show = true;
     [SerializeField] private LilyScript lily;
     [SerializeField] private TMP_SpriteAsset spriteAsset;
     private TMP_Text text;
@@ -19,6 +21,13 @@ public class LoveDisplay : MonoBehaviour
     void Update()
     {
         if (lily == null || text == null) return;
+
+        if (!show)
+        {
+            if (text.enabled) text.enabled = false;
+            return;
+        }
+        if (!text.enabled) text.enabled = true;
 
         if (spriteAsset != null && text.spriteAsset != spriteAsset)
             text.spriteAsset = spriteAsset;

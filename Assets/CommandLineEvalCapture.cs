@@ -12,25 +12,36 @@ using UnityEngine;
 /// Usage (passed via ML-Agents --env-args):
 ///   --capture-dir <path>         Directory for PNG frames
 ///   --capture-dir-b <path>       Directory for 2nd camera PNG frames
+///   --capture-dir-c <path>       Directory for 3rd camera PNG frames
 ///   --capture-every <n>          Capture every n rendered frames (default: 1)
 ///   --capture-width <w>          Camera capture width (default: 1920)
 ///   --capture-height <h>         Camera capture height (default: 1080)
+///   --capture-msaa <n>             RenderTexture MSAA 1/2/4/8 (default: 4; 1 = off)
 ///   --capture-camera-a <name>    Camera A name (optional)
 ///   --capture-camera-b <name>    Camera B name (optional)
+///   --capture-camera-c <name>    Camera C name (optional)
 ///   --quit-after-steps <n>       Quit after n Academy steps (default: disabled)
-///   --quit-after-episodes <n>    Quit after n completed episodes (requires agent integration)
+///   --quit-after-episodes <n>    Quit after n completed episodes (0 = disabled; requires agent integration)
 ///   --quit-after-seconds <s>     Quit after s real-time seconds (works even if Academy doesn't step)
 ///   --quit-delay-seconds <s>     Delay before quitting to allow final frame writes (default: 0.5)
 /// </summary>
 public sealed class CommandLineEvalCapture : MonoBehaviour
 {
+    // Для валидации видео важнее стабильная частота кадров, чем скорость симуляции.
+    private const int CaptureTargetFps = 30;
     private string _captureDir;
     private string _captureDirB;
+    private string _captureDirC;
     private int _captureEvery = 1;
     private int _captureWidth = 1920;
     private int _captureHeight = 1080;
+    private int _captureMsaa = 4;
+    // png = тяжело (мало FPS), jpg = гораздо быстрее (для валидации обычно достаточно).
+    private string _captureFormat = "jpg";
+    private int _jpgQuality = 85;
     private string _cameraAName;
     private string _cameraBName;
+    private string _cameraCName;
     private long _quitAfterSteps = -1;
     private int _quitAfterEpisodes = -1;
     private float _quitAfterSeconds = -1f;
@@ -38,16 +49,21 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
 
     private int _frameIndexA;
     private int _frameIndexB;
+    private int _frameIndexC;
     private int _renderFrameCounter;
     private long _startStep = -1;
     private bool _quitScheduled;
     private float _startRealtime = -1f;
     private Camera _cameraA;
     private Camera _cameraB;
+    private Camera _cameraC;
     private Camera _thirdPersonCameraB;
+    private Camera _jackOverheadCameraC;
     private Transform _jackTarget;
     private Vector3 _thirdPersonOffset = new Vector3(0f, 2.2f, -4.5f);
     private Vector3 _thirdPersonLookAtOffset = new Vector3(0f, 1.2f, 0f);
+    private Vector3 _overheadOffset = new Vector3(0f, 12f, 0f);
+    private Vector3 _overheadLookAtOffset = new Vector3(0f, 1.0f, 0f);
     private Texture2D _captureTexture;
     private RenderTexture _captureRt;
 
@@ -62,7 +78,7 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
             // Only create the helper if any of the supported flags are present.
             for (var i = 0; i < args.Length; i++)
             {
-                if (args[i] == "--capture-dir" || args[i] == "--capture-dir-b" || args[i] == "--quit-after-steps")
+                if (args[i] == "--capture-dir" || args[i] == "--capture-dir-b" || args[i] == "--capture-dir-c" || args[i] == "--quit-after-steps")
                 {
                     var go = new GameObject(nameof(CommandLineEvalCapture));
                     DontDestroyOnLoad(go);
@@ -80,6 +96,17 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
     private void Awake()
     {
         ParseArgs(Environment.GetCommandLineArgs());
+
+        // Стабилизируем рендер-кадры, чтобы видео не было «ускоренным» и не заканчивалось слишком быстро
+        // из-за чрезмерно высокой частоты кадров/симуляции.
+        if (!string.IsNullOrWhiteSpace(_captureDir)
+            || !string.IsNullOrWhiteSpace(_captureDirB)
+            || !string.IsNullOrWhiteSpace(_captureDirC))
+        {
+            QualitySettings.vSyncCount = 0;
+            Application.targetFrameRate = CaptureTargetFps;
+            Time.timeScale = 1f;
+        }
 
         if (!string.IsNullOrWhiteSpace(_captureDir))
         {
@@ -107,6 +134,19 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
             }
         }
 
+        if (!string.IsNullOrWhiteSpace(_captureDirC))
+        {
+            Directory.CreateDirectory(_captureDirC);
+            try
+            {
+                File.WriteAllText(Path.Combine(_captureDirC, "capture_started.txt"), DateTime.UtcNow.ToString("O"));
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
         InitCaptureResources();
 
         if (_quitAfterEpisodes > 0)
@@ -122,8 +162,10 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         // If we need a 2nd camera capture, ensure a 3rd-person Jack camera exists.
         if (!string.IsNullOrWhiteSpace(_captureDirB))
             EnsureJackThirdPersonCameraB();
+        if (!string.IsNullOrWhiteSpace(_captureDirC))
+            EnsureJackOverheadCameraC();
 
-        if (!string.IsNullOrWhiteSpace(_captureDir) || !string.IsNullOrWhiteSpace(_captureDirB))
+        if (!string.IsNullOrWhiteSpace(_captureDir) || !string.IsNullOrWhiteSpace(_captureDirB) || !string.IsNullOrWhiteSpace(_captureDirC))
         {
             _renderFrameCounter++;
             if (_renderFrameCounter % Math.Max(1, _captureEvery) == 0)
@@ -165,7 +207,35 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
 
     private void Quit()
     {
+        WriteCaptureMetaFiles();
         Application.Quit(0);
+    }
+
+    /// <summary>
+    /// Пишет wall_seconds и frame_count — bash/ffmpeg могут выставить -framerate = frames/wall,
+    /// чтобы длительность mp4 совпадала с реальным временем захвата (без «ускоренного» ролика).
+    /// </summary>
+    private void WriteCaptureMetaFiles()
+    {
+        var wall = Mathf.Max(0.001f, Time.realtimeSinceStartup - _startRealtime);
+        TryWriteCaptureMeta(_captureDir, _frameIndexA, wall);
+        TryWriteCaptureMeta(_captureDirB, _frameIndexB, wall);
+        TryWriteCaptureMeta(_captureDirC, _frameIndexC, wall);
+    }
+
+    private static void TryWriteCaptureMeta(string dir, int frameCount, float wallSeconds)
+    {
+        if (string.IsNullOrWhiteSpace(dir)) return;
+        try
+        {
+            var path = Path.Combine(dir, "capture_meta.txt");
+            var w = wallSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            File.WriteAllText(path, $"wall_seconds={w}\nframe_count={frameCount}\n");
+        }
+        catch
+        {
+            // ignore
+        }
     }
 
     private void OnDestroy()
@@ -185,7 +255,23 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
     {
         _captureWidth = Math.Max(64, _captureWidth);
         _captureHeight = Math.Max(64, _captureHeight);
+        if (_captureRt != null)
+        {
+            _captureRt.Release();
+            Destroy(_captureRt);
+            _captureRt = null;
+        }
+        if (_captureTexture != null)
+        {
+            Destroy(_captureTexture);
+            _captureTexture = null;
+        }
+
         _captureRt = new RenderTexture(_captureWidth, _captureHeight, 24, RenderTextureFormat.ARGB32);
+        var msaa = _captureMsaa >= 8 ? 8 : _captureMsaa >= 4 ? 4 : _captureMsaa >= 2 ? 2 : 1;
+        _captureRt.antiAliasing = msaa;
+        _captureRt.filterMode = FilterMode.Trilinear;
+        _captureRt.Create();
         _captureTexture = new Texture2D(_captureWidth, _captureHeight, TextureFormat.RGB24, false);
         ResolveCameras();
     }
@@ -201,24 +287,31 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
             _cameraA = cameras.FirstOrDefault(c => c.name == _cameraAName);
         if (!string.IsNullOrWhiteSpace(_cameraBName))
             _cameraB = cameras.FirstOrDefault(c => c.name == _cameraBName);
+        if (!string.IsNullOrWhiteSpace(_cameraCName))
+            _cameraC = cameras.FirstOrDefault(c => c.name == _cameraCName);
 
         if (_cameraA == null)
             _cameraA = Camera.main ?? cameras.FirstOrDefault();
 
         if (_cameraB == null)
             _cameraB = cameras.FirstOrDefault(c => c != _cameraA);
+
+        if (_cameraC == null)
+            _cameraC = cameras.FirstOrDefault(c => c != _cameraA && c != _cameraB);
     }
 
     private void CaptureFrames()
     {
         // Some cameras may spawn after scene load.
-        if (_cameraA == null || (!string.IsNullOrWhiteSpace(_captureDirB) && _cameraB == null))
+        if (_cameraA == null
+            || (!string.IsNullOrWhiteSpace(_captureDirB) && _cameraB == null)
+            || (!string.IsNullOrWhiteSpace(_captureDirC) && _cameraC == null))
             ResolveCameras();
 
         if (!string.IsNullOrWhiteSpace(_captureDir))
         {
             if (_cameraA != null)
-                CaptureCameraToPng(_cameraA, _captureDir, ref _frameIndexA);
+                CaptureCameraToImage(_cameraA, _captureDir, ref _frameIndexA);
             else
                 CaptureScreenFallback(_captureDir, ref _frameIndexA);
         }
@@ -226,7 +319,13 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         if (!string.IsNullOrWhiteSpace(_captureDirB))
         {
             if (_cameraB != null)
-                CaptureCameraToPng(_cameraB, _captureDirB, ref _frameIndexB);
+                CaptureCameraToImage(_cameraB, _captureDirB, ref _frameIndexB);
+        }
+
+        if (!string.IsNullOrWhiteSpace(_captureDirC))
+        {
+            if (_cameraC != null)
+                CaptureCameraToImage(_cameraC, _captureDirC, ref _frameIndexC);
         }
     }
 
@@ -278,7 +377,53 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         }
     }
 
-    private void CaptureCameraToPng(Camera camera, string dir, ref int index)
+    private void EnsureJackOverheadCameraC()
+    {
+        // If a named camera C was requested and exists, don't override it.
+        if (!string.IsNullOrWhiteSpace(_cameraCName))
+        {
+            if (_cameraC != null) return;
+            ResolveCameras();
+            if (_cameraC != null) return;
+        }
+
+        if (_jackOverheadCameraC == null)
+        {
+            var go = GameObject.Find("JackOverheadCamera");
+            if (go == null)
+                go = new GameObject("JackOverheadCamera");
+
+            _jackOverheadCameraC = go.GetComponent<Camera>();
+            if (_jackOverheadCameraC == null)
+                _jackOverheadCameraC = go.AddComponent<Camera>();
+
+            _jackOverheadCameraC.enabled = true;
+            _jackOverheadCameraC.depth = -101; // keep it out of the main stack ordering
+            _jackOverheadCameraC.clearFlags = CameraClearFlags.Skybox;
+
+            _cameraC = _jackOverheadCameraC;
+        }
+
+        if (_jackTarget == null)
+        {
+            AgentGoToHouseDiscrete jack;
+#if UNITY_2023_1_OR_NEWER
+            jack = FindAnyObjectByType<AgentGoToHouseDiscrete>();
+#else
+            jack = FindObjectOfType<AgentGoToHouseDiscrete>();
+#endif
+            if (jack != null) _jackTarget = jack.transform;
+        }
+
+        if (_jackTarget != null)
+        {
+            _jackOverheadCameraC.transform.position = _jackTarget.TransformPoint(_overheadOffset);
+            var lookAt = _jackTarget.TransformPoint(_overheadLookAtOffset);
+            _jackOverheadCameraC.transform.rotation = Quaternion.LookRotation(lookAt - _jackOverheadCameraC.transform.position, Vector3.up);
+        }
+    }
+
+    private void CaptureCameraToImage(Camera camera, string dir, ref int index)
     {
         var prevTarget = camera.targetTexture;
         var prevActive = RenderTexture.active;
@@ -292,8 +437,20 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         camera.targetTexture = prevTarget;
         RenderTexture.active = prevActive;
 
-        var bytes = _captureTexture.EncodeToPNG();
-        var path = Path.Combine(dir, $"frame_{index:D06}.png");
+        byte[] bytes;
+        string ext;
+        if (string.Equals(_captureFormat, "png", StringComparison.OrdinalIgnoreCase))
+        {
+            bytes = _captureTexture.EncodeToPNG();
+            ext = "png";
+        }
+        else
+        {
+            bytes = ImageConversion.EncodeToJPG(_captureTexture, Mathf.Clamp(_jpgQuality, 1, 100));
+            ext = "jpg";
+        }
+
+        var path = Path.Combine(dir, $"frame_{index:D06}.{ext}");
         File.WriteAllBytes(path, bytes);
         index++;
     }
@@ -333,6 +490,11 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
             _captureDirB = captureDirB;
         }
 
+        if (dict.TryGetValue("--capture-dir-c", out var captureDirC) && !string.IsNullOrWhiteSpace(captureDirC))
+        {
+            _captureDirC = captureDirC;
+        }
+
         if (dict.TryGetValue("--capture-every", out var captureEveryStr) && int.TryParse(captureEveryStr, out var captureEvery))
         {
             _captureEvery = Mathf.Max(1, captureEvery);
@@ -348,6 +510,22 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
             _captureHeight = Math.Max(64, height);
         }
 
+        if (dict.TryGetValue("--capture-msaa", out var msaaStr) && int.TryParse(msaaStr, out var msaa))
+        {
+            _captureMsaa = Mathf.Clamp(msaa, 1, 8);
+        }
+
+        if (dict.TryGetValue("--capture-format", out var fmt) && !string.IsNullOrWhiteSpace(fmt))
+        {
+            var f = fmt.Trim().ToLowerInvariant();
+            _captureFormat = (f == "png") ? "png" : "jpg";
+        }
+
+        if (dict.TryGetValue("--capture-jpg-quality", out var qStr) && int.TryParse(qStr, out var q))
+        {
+            _jpgQuality = Mathf.Clamp(q, 1, 100);
+        }
+
         if (dict.TryGetValue("--capture-camera-a", out var cameraAName) && !string.IsNullOrWhiteSpace(cameraAName))
         {
             _cameraAName = cameraAName;
@@ -358,6 +536,11 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
             _cameraBName = cameraBName;
         }
 
+        if (dict.TryGetValue("--capture-camera-c", out var cameraCName) && !string.IsNullOrWhiteSpace(cameraCName))
+        {
+            _cameraCName = cameraCName;
+        }
+
         if (dict.TryGetValue("--quit-after-steps", out var quitAfterStepsStr) && long.TryParse(quitAfterStepsStr, out var quitAfterSteps))
         {
             _quitAfterSteps = Math.Max(1, quitAfterSteps);
@@ -365,7 +548,8 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
 
         if (dict.TryGetValue("--quit-after-episodes", out var quitAfterEpisodesStr) && int.TryParse(quitAfterEpisodesStr, out var quitAfterEpisodes))
         {
-            _quitAfterEpisodes = Mathf.Max(1, quitAfterEpisodes);
+            // 0 = выключить выход по числу эпизодов (оставить только quit-after-seconds / steps).
+            _quitAfterEpisodes = quitAfterEpisodes <= 0 ? -1 : Mathf.Max(1, quitAfterEpisodes);
         }
 
         if (dict.TryGetValue("--quit-after-seconds", out var quitAfterSecondsStr) && float.TryParse(quitAfterSecondsStr, out var quitAfterSeconds))

@@ -48,9 +48,6 @@ public class ZombieHealth : MonoBehaviour, IHasHp
 
     private void Start()
     {
-        if (GetComponent<HpBarVisual>() == null)
-            gameObject.AddComponent<HpBarVisual>();
-
         animator = GetComponentInChildren<Animator>() ?? GetComponent<Animator>();
         controller = GetComponent<CharacterController>();
         rb = GetComponent<Rigidbody>();

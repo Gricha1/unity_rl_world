@@ -31,6 +31,8 @@ public class LilyScript : Agent, IHasHp
     [SerializeField] private float optionKissIconScale = 0.45f;
     [SerializeField] private int optionIconSortingOrder = 100;
     [SerializeField] private bool optionIconFaceCamera = true;
+    [Tooltip("Если задано — иконка разворачивается к этой камере; иначе MainCamera или камера с максимальным depth.")]
+    [SerializeField] private Camera optionIconBillboardCamera;
     [Tooltip("Снять галочку, чтобы скрыть иконку задачи над агентом.")]
     [SerializeField] private bool showOptionTaskIcon = true;
 
@@ -56,8 +58,11 @@ public class LilyScript : Agent, IHasHp
     [SerializeField] private string doActionAnimTrigger = "Do";
     [Tooltip("Пауза между срабатываниями DO (сбор цветка или поцелуй).")]
     [SerializeField] private float collectActionCooldownSeconds = 0.45f;
+    [Tooltip("Сглаживание параметра Speed в Animator (0 = без сглаживания).")]
+    [SerializeField] private float walkAnimSpeedDamp = 0f;
     private int _lastCollectAction;
     private float _doCooldownRemaining;
+    private float _lastPlanarMoveInput;
 
     [Header("Movement")]
     [SerializeField] private float moveSpeed = 3f;
@@ -190,16 +195,40 @@ public class LilyScript : Agent, IHasHp
 
     private void LateUpdate()
     {
+        ApplyWalkAnimatorSpeed();
+
         if (!showOptionTaskIcon || optionIconRenderer == null) return;
 
-        optionIconRenderer.transform.position = transform.position + optionIconOffset;
+        Vector3 iconPos = transform.position + optionIconOffset;
+        optionIconRenderer.transform.position = iconPos;
 
-        if (optionIconFaceCamera && Camera.main != null)
+        if (optionIconFaceCamera)
         {
-            var camForward = Camera.main.transform.forward;
-            if (camForward.sqrMagnitude > 0.0001f)
-                optionIconRenderer.transform.rotation = Quaternion.LookRotation(camForward);
+            var cam = BillboardIconCamera.Resolve(iconPos, optionIconBillboardCamera);
+            if (cam != null)
+            {
+                Vector3 toCam = cam.transform.position - iconPos;
+                if (toCam.sqrMagnitude > 1e-6f)
+                    optionIconRenderer.transform.rotation = Quaternion.LookRotation(toCam.normalized, cam.transform.up);
+            }
         }
+    }
+
+    private void ApplyWalkAnimatorSpeed()
+    {
+        if (animator == null || controller == null) return;
+
+        Vector3 v = controller.velocity;
+        v.y = 0f;
+        float velNorm = moveSpeed > 1e-4f ? Mathf.Clamp01(v.magnitude / moveSpeed) : 0f;
+        float target = Mathf.Max(Mathf.Abs(_lastPlanarMoveInput), velNorm);
+        if (target < 0.02f)
+            target = 0f;
+
+        if (walkAnimSpeedDamp > 0f)
+            animator.SetFloat("Speed", target, walkAnimSpeedDamp, Time.deltaTime);
+        else
+            animator.SetFloat("Speed", target);
     }
 
     private void UpdateOptionIconVisual()
@@ -439,8 +468,7 @@ public class LilyScript : Agent, IHasHp
         Vector3 move = transform.forward * moveInput * moveSpeed + Vector3.up * verticalVelocity;
         controller.Move(move * Time.deltaTime);
 
-        if (animator != null)
-            animator.SetFloat("Speed", Mathf.Abs(moveInput));
+        _lastPlanarMoveInput = moveInput;
 
         AddReward(stepPenalty);
 
