@@ -14,6 +14,20 @@ public class ZombieChase : MonoBehaviour
     [SerializeField] private float moveSpeed = 0.5f;
     [SerializeField] private float rotationSpeed = 120f;
 
+    [Header("Path (optional)")]
+    [Tooltip("Если true — зомби идёт по точкам внутри pathRoot (FirstPoint, SecondPoint...) вместо преследования целей.")]
+    [SerializeField] private bool followPath = false;
+    [SerializeField] private Transform pathRoot;
+    [SerializeField] private float pathArriveDistance = 0.2f;
+    [SerializeField] private float pathWaitSeconds = 0.0f;
+    [SerializeField] private bool pathLoop = true;
+    [Tooltip("Если pathLoop выключен, то после последней точки зомби возвращается к обычному преследованию Jack/Lily.")]
+    [SerializeField] private bool resumeChaseAfterLastPoint = true;
+
+    [Header("Idle (optional)")]
+    [Tooltip("Если true — зомби стоит на месте (не идёт по пути и не преследует цели).")]
+    [SerializeField] private bool stayInPlace = false;
+
     [Header("Gravity")]
     [SerializeField] private float gravity = -9.81f;
 
@@ -27,6 +41,8 @@ public class ZombieChase : MonoBehaviour
     private float verticalVelocity;
     private bool useRigidbody;
     private float _walkAnimIntent;
+    private int _pathIndex;
+    private float _pathWaitLeft;
 
     [Header("Stun / Freeze")]
     [Tooltip("Время, до которого зомби не может двигаться (устанавливается через Stun).")]
@@ -58,6 +74,8 @@ public class ZombieChase : MonoBehaviour
     private void OnEnable()
     {
         meleeDoHitsFromAgents = 0;
+        _pathIndex = 0;
+        _pathWaitLeft = 0f;
     }
 
     private void Start()
@@ -84,6 +102,19 @@ public class ZombieChase : MonoBehaviour
         if (Time.time < stunnedUntilTime)
         {
             _walkAnimIntent = 0f;
+            return;
+        }
+
+        if (stayInPlace)
+        {
+            _walkAnimIntent = 0f;
+            return;
+        }
+
+        if (followPath)
+        {
+            if (useRigidbody) return; // Rigidbody двигаем в FixedUpdate
+            PathStepCharacterController();
             return;
         }
 
@@ -135,6 +166,20 @@ public class ZombieChase : MonoBehaviour
             rb.linearVelocity = Vector3.zero;
             return;
         }
+
+        if (stayInPlace)
+        {
+            rb.linearVelocity = Vector3.zero;
+            _walkAnimIntent = 0f;
+            return;
+        }
+
+        if (followPath)
+        {
+            PathStepRigidbody();
+            return;
+        }
+
         Transform target = GetClosestTarget();
         if (target == null) return;
 
@@ -152,6 +197,122 @@ public class ZombieChase : MonoBehaviour
     private void LateUpdate()
     {
         ApplyWalkAnimatorSpeed();
+    }
+
+    private bool TryGetCurrentPathPoint(out Transform point)
+    {
+        point = null;
+        if (pathRoot == null) return false;
+        int n = pathRoot.childCount;
+        if (n <= 0) return false;
+        if (_pathIndex < 0 || _pathIndex >= n) _pathIndex = 0;
+        point = pathRoot.GetChild(_pathIndex);
+        return point != null;
+    }
+
+    private void AdvancePath()
+    {
+        if (pathRoot == null) return;
+        int n = pathRoot.childCount;
+        if (n <= 0) return;
+        _pathIndex++;
+        if (_pathIndex >= n)
+        {
+            if (pathLoop)
+            {
+                _pathIndex = 0;
+            }
+            else
+            {
+                // Дошли до конца пути — возвращаемся к обычному поведению
+                if (resumeChaseAfterLastPoint)
+                {
+                    followPath = false;
+                    _walkAnimIntent = 0f;
+                }
+                _pathIndex = n - 1;
+            }
+        }
+    }
+
+    private void PathStepCharacterController()
+    {
+        if (controller == null) return;
+        if (!TryGetCurrentPathPoint(out var target))
+        {
+            _walkAnimIntent = 0f;
+            return;
+        }
+
+        if (_pathWaitLeft > 0f)
+        {
+            _pathWaitLeft -= Time.deltaTime;
+            _walkAnimIntent = 0f;
+            return;
+        }
+
+        Vector3 pos = transform.position;
+        Vector3 delta = target.position - pos;
+        delta.y = 0f;
+        float dist = delta.magnitude;
+        if (dist <= pathArriveDistance)
+        {
+            _walkAnimIntent = 0f;
+            _pathWaitLeft = Mathf.Max(0f, pathWaitSeconds);
+            AdvancePath();
+            return;
+        }
+
+        Vector3 dir = dist > 1e-6f ? delta / dist : Vector3.zero;
+        _walkAnimIntent = 1f;
+
+        Quaternion targetRot = Quaternion.LookRotation(dir);
+        transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, rotationSpeed * Time.deltaTime);
+
+        if (controller.isGrounded && verticalVelocity < 0f)
+            verticalVelocity = -2f;
+        else
+            verticalVelocity += gravity * Time.deltaTime;
+
+        Vector3 move = dir * moveSpeed + Vector3.up * verticalVelocity;
+        controller.Move(move * Time.deltaTime);
+    }
+
+    private void PathStepRigidbody()
+    {
+        if (!TryGetCurrentPathPoint(out var target))
+            return;
+
+        if (_pathWaitLeft > 0f)
+        {
+            _pathWaitLeft -= Time.fixedDeltaTime;
+            _walkAnimIntent = 0f;
+            rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);
+            return;
+        }
+
+        Vector3 delta = target.position - transform.position;
+        delta.y = 0f;
+        float dist = delta.magnitude;
+        if (dist <= pathArriveDistance)
+        {
+            _walkAnimIntent = 0f;
+            _pathWaitLeft = Mathf.Max(0f, pathWaitSeconds);
+            AdvancePath();
+            rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);
+            return;
+        }
+
+        Vector3 dir = dist > 1e-6f ? delta / dist : Vector3.zero;
+        _walkAnimIntent = 1f;
+
+        Quaternion targetRot = Quaternion.LookRotation(dir);
+        transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, rotationSpeed * Time.fixedDeltaTime);
+
+        Vector3 vel = dir * moveSpeed;
+        vel.y = rb.linearVelocity.y + gravity * Time.fixedDeltaTime;
+        if (vel.y < -20f) vel.y = -20f;
+        rb.linearVelocity = vel;
     }
 
     private void ApplyWalkAnimatorSpeed()

@@ -16,6 +16,13 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
     [SerializeField] private SheepSpawner sheepSpawner;
 
+    [Header("Spawn")]
+    [Tooltip("Если true — Jack спавнится у дома в фиксированной позиции/повороте (не случайно).")]
+    [SerializeField] private bool spawnAtHouseFixed = false;
+
+    [SerializeField] private Vector3 fixedSpawnPosition = new Vector3(-25.4899998f, 0.257999986f, 0.649999976f);
+    [SerializeField] private Vector3 fixedSpawnEuler = new Vector3(0f, 177.644073f, 0f);
+
     [Header("HUD")]
     [Tooltip("Показывать HUD HP (левый верхний угол) для Jack/Lily. Выключи, чтобы полностью убрать этот HUD до Play.")]
     [SerializeField] private bool showHudHpTopLeft = true;
@@ -39,6 +46,8 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
     [SerializeField] private Vector3 optionIconOffset = new Vector3(0f, 2.2f, 0f);
     [SerializeField] private float optionWoodIconScale = 0.55f;
     [SerializeField] private float optionFoodIconScale = 0.35f;
+    [Tooltip("Доп. множитель размера иконки, когда камера захвата/просмотра = CamOnJack.")]
+    [SerializeField] private float optionIconScaleMultiplierCamOnJack = 0.55f;
     [SerializeField] private int optionIconSortingOrder = 100;
     [SerializeField] private bool optionIconFaceCamera = true;
     [Tooltip("Если задано — иконка разворачивается к этой камере; иначе MainCamera или камера с максимальным depth.")]
@@ -47,6 +56,7 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
     [SerializeField] private bool showOptionTaskIcon = true;
 
     private bool _lastShowOptionTaskIcon = true;
+    private float _optionIconBaseScale = 0.35f;
 
     [SerializeField] private float eatDistance = 1.2f; // дистанция до овечки
     [SerializeField] private LayerMask sheepLayer;     // слой овечки
@@ -77,7 +87,6 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
 
     [Header("Target")]
     [SerializeField] private Transform houseTarget;
-    [SerializeField] private int maxSteps = 1000;
 
     [Header("Heat")]
     [SerializeField] private float heatDecayInterval = 5.0f; // секунд на 1 единицу тепла
@@ -237,6 +246,7 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         float s = currentOptionTrain == 0
             ? Mathf.Max(0.01f, optionWoodIconScale)
             : Mathf.Max(0.01f, optionFoodIconScale);
+        _optionIconBaseScale = s;
         optionIconRenderer.transform.localScale = Vector3.one * s;
     }
 
@@ -263,12 +273,19 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         float maxZ = -0.01f;
         float y = 0.42f;
 
-        float randX = Random.Range(minX, maxX);
-        float randZ = Random.Range(minZ, maxZ);
-
         controller.enabled = false;
-        transform.position = new Vector3(randX, y, randZ);
-        transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
+        if (spawnAtHouseFixed)
+        {
+            transform.position = fixedSpawnPosition;
+            transform.rotation = Quaternion.Euler(fixedSpawnEuler);
+        }
+        else
+        {
+            float randX = Random.Range(minX, maxX);
+            float randZ = Random.Range(minZ, maxZ);
+            transform.position = new Vector3(randX, y, randZ);
+            transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
+        }
         controller.enabled = true;
 
         prevPosition = transform.position;
@@ -437,6 +454,11 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
                 Vector3 toCam = cam.transform.position - iconPos;
                 if (toCam.sqrMagnitude > 1e-6f)
                     optionIconRenderer.transform.rotation = Quaternion.LookRotation(toCam.normalized, cam.transform.up);
+
+                float mul = (cam.name == "CamOnJack")
+                    ? Mathf.Clamp(optionIconScaleMultiplierCamOnJack, 0.05f, 2f)
+                    : 1f;
+                optionIconRenderer.transform.localScale = Vector3.one * (_optionIconBaseScale * mul);
             }
         }
     }
@@ -890,14 +912,7 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         }
 
 
-        if (stepCount >= maxSteps)
-        {
-            var statsRecorder = Academy.Instance.StatsRecorder;
-            statsRecorder.Add("collision", 0.0f);
-            
-            EvalEpisodeTracker.NotifyEpisodeEnded();
-            EndEpisode();
-        }
+        // Лимит эпизода задаётся только через Agent.MaxStep (поле "Max Step" в инспекторе).
 
         _lastChopActionForAnim = chopAction;
     }

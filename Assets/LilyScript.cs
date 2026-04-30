@@ -89,8 +89,18 @@ public class LilyScript : Agent, IHasHp
     [Tooltip("Включить для первой стадии: у Lily остаются только опции 0 (цветы) и 1 (поцелуй).")]
     [SerializeField] private bool curriculumNoShootNoZombie = false;
 
-    [Header("Episode")]
-    [SerializeField] private int maxSteps = 1500;
+    [Header("Spawn")]
+    [Tooltip("Если true — Lily спавнится в фиксированной позиции (не случайно).")]
+    [SerializeField] private bool spawnAtFixedPosition = false;
+    [SerializeField] private Vector3 fixedSpawnPosition = new Vector3(25.2299995f, 0.920000017f, -38.25f);
+
+    [Header("Path (cinematic)")]
+    [Tooltip("Если true — Lily игнорирует действия и идёт по точкам внутри pathRoot (FirstPoint, SecondPoint...).")]
+    [SerializeField] private bool followPath = false;
+    [SerializeField] private Transform pathRoot;
+    [SerializeField] private float pathArriveDistance = 0.15f;
+    [SerializeField] private float pathWaitSeconds = 0.0f;
+    [SerializeField] private bool pathLoop = true;
 
     /// <summary>True — режим curriculum: у Lily только опции 0/1.</summary>
     public bool CurriculumNoShootNoZombie => curriculumNoShootNoZombie;
@@ -104,6 +114,8 @@ public class LilyScript : Agent, IHasHp
     private int stepCount;
     private float flowerDecayTimer;
     private float loveDecayTimer;
+    private int _pathIndex;
+    private float _pathWaitLeft;
 
     public int FlowerCount { get; private set; }
     public int Love { get; private set; }
@@ -301,6 +313,8 @@ public class LilyScript : Agent, IHasHp
         hp = maxHp;
         _lastCollectAction = 0;
         _doCooldownRemaining = 0f;
+        _pathIndex = 0;
+        _pathWaitLeft = 0f;
 
         // Опция: либо utility+softmax, либо случайно
         if (useUtilitySoftmaxSampling)
@@ -319,9 +333,29 @@ public class LilyScript : Agent, IHasHp
         float randZ = Random.Range(minZ, maxZ);
 
         controller.enabled = false;
-        transform.position = new Vector3(randX, y, randZ);
-        transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
+        if (spawnAtFixedPosition)
+        {
+            transform.position = fixedSpawnPosition;
+            transform.rotation = Quaternion.identity; // 0 0 0
+        }
+        else
+        {
+            transform.position = new Vector3(randX, y, randZ);
+            transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
+        }
         controller.enabled = true;
+
+        if (followPath && pathRoot != null && pathRoot.childCount > 0)
+        {
+            var p0 = pathRoot.GetChild(0);
+            if (p0 != null)
+            {
+                controller.enabled = false;
+                transform.SetPositionAndRotation(p0.position, p0.rotation);
+                controller.enabled = true;
+                _pathIndex = 1 % pathRoot.childCount;
+            }
+        }
 
         if (flowerSpawner != null)
             flowerSpawner.ResetFlowers();
@@ -409,28 +443,36 @@ public class LilyScript : Agent, IHasHp
         sensor.AddObservation(maxFlowerCount > 0 ? (float)FlowerCount / maxFlowerCount : 0f);
         sensor.AddObservation(maxLove > 0 ? (float)Love / maxLove : 0f);
 
-        // Цветы
-        if (GetNearestFlower(out GameObject flower, out float dist))
+        // Цветы: без дистанции и направления к цветку — только флаг «в радиусе сбора»
+        if (GetNearestFlower(out _, out float dist))
         {
-            sensor.AddObservation(Mathf.Clamp01(dist / MaxFlowerDistForObs));
-            Vector3 dir = (flower.transform.position - transform.position).normalized;
-            sensor.AddObservation(dir.x);
-            sensor.AddObservation(dir.z);
             sensor.AddObservation(dist <= collectDistance ? 1f : 0f);
         }
         else
         {
-            sensor.AddObservation(1f);
-            sensor.AddObservation(0f);
-            sensor.AddObservation(0f);
             sensor.AddObservation(0f);
         }
 
-        // Джек и зомби — только через лидар (компонент на агенте), координаты сюда не подаём
+        // Джек в радиусе поцелуя (как IsJackInKissRange / kissDistance + jackLayer)
+        sensor.AddObservation(IsJackInKissRange() ? 1f : 0f);
+
+        // Зомби — только через лидар (компонент на агенте)
     }
 
     public override void OnActionReceived(ActionBuffers actions)
     {
+        if (followPath)
+        {
+            PathStep();
+            stepCount++;
+            if (MaxStep > 0 && stepCount >= MaxStep)
+            {
+                EvalEpisodeTracker.NotifyEpisodeEnded();
+                EndEpisode();
+            }
+            return;
+        }
+
         // Utility sampling: пересэмпливаем каждые 20 шагов (если включено)
         if (useUtilitySoftmaxSampling && stepCount > 0 && (stepCount % 20) == 0)
         {
@@ -450,13 +492,14 @@ public class LilyScript : Agent, IHasHp
         if (collectReady && animator != null && doActionAnimTrigger.Length > 0)
             animator.SetTrigger(doActionAnimTrigger);
 
+        // Дискретные действия как у Jack: ветка0 — 1 вперёд, 3 назад, 2 стой; ветка1 — 1/3 поворот, 2 не крутить
         float moveInput = 0f;
-        if (moveAction == 2) moveInput = 1f;
-        else if (moveAction == 0) moveInput = -1f;
+        if (moveAction == 1) moveInput = 1f;
+        else if (moveAction == 3) moveInput = -1f;
 
         float rotateInput = 0f;
-        if (rotateAction == 2) rotateInput = 1f;
-        else if (rotateAction == 0) rotateInput = -1f;
+        if (rotateAction == 1) rotateInput = 1f;
+        else if (rotateAction == 3) rotateInput = -1f;
 
         transform.Rotate(0f, rotateInput * rotationSpeed * Time.deltaTime, 0f);
 
@@ -535,7 +578,7 @@ public class LilyScript : Agent, IHasHp
         _lastCollectAction = collectAction;
 
         stepCount++;
-        if (stepCount >= maxSteps)
+        if (MaxStep > 0 && stepCount >= MaxStep)
         {
             EvalEpisodeTracker.NotifyEpisodeEnded();
             EndEpisode();
@@ -637,18 +680,85 @@ public class LilyScript : Agent, IHasHp
     public override void Heuristic(in ActionBuffers actionsOut)
     {
         var d = actionsOut.DiscreteActions;
-        int moveAction = 1;
-        int rotateAction = 1;
-        int collectAction = Input.GetMouseButton(1) ? 1 : 0;  // ПКМ — действие DO (собрать/поцеловать)
+        // Как у Jack: move 1/3/2, rotate 1/3/2; стрелки = W/S и A/D по смыслу
+        int moveAction = 2;
+        if (Input.GetKey(KeyCode.UpArrow) || Input.GetKey(KeyCode.W)) moveAction = 1;
+        else if (Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.S)) moveAction = 3;
 
-        // Только стрелки управляют движением (при любой опции; без авто-движения к Джеку)
-        if (Input.GetKey(KeyCode.UpArrow)) moveAction = 2;
-        else if (Input.GetKey(KeyCode.DownArrow)) moveAction = 0;
-        if (Input.GetKey(KeyCode.RightArrow)) rotateAction = 2;
-        else if (Input.GetKey(KeyCode.LeftArrow)) rotateAction = 0;
+        int rotateAction = 2;
+        if (Input.GetKey(KeyCode.RightArrow) || Input.GetKey(KeyCode.D)) rotateAction = 1;
+        else if (Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.A)) rotateAction = 3;
+
+        int collectAction = Input.GetMouseButton(1) ? 1 : 0;  // ПКМ — DO (собрать/поцеловать)
 
         d[0] = moveAction;
         d[1] = rotateAction;
         d[2] = collectAction;
+    }
+
+    private void PathStep()
+    {
+        if (controller == null) controller = GetComponent<CharacterController>();
+        if (animator == null) animator = GetComponent<Animator>();
+
+        if (pathRoot == null || pathRoot.childCount == 0)
+            return;
+
+        if (_pathWaitLeft > 0f)
+        {
+            _pathWaitLeft -= Time.deltaTime;
+            if (animator != null)
+                animator.SetFloat("Speed", 0f);
+            return;
+        }
+
+        if (_pathIndex < 0 || _pathIndex >= pathRoot.childCount)
+            _pathIndex = 0;
+
+        var target = pathRoot.GetChild(_pathIndex);
+        if (target == null)
+        {
+            _pathIndex = (_pathIndex + 1) % pathRoot.childCount;
+            return;
+        }
+
+        Vector3 delta = target.position - transform.position;
+        delta.y = 0f;
+        float dist = delta.magnitude;
+
+        // Поворот плавно в сторону движения
+        if (delta.sqrMagnitude > 1e-6f)
+        {
+            Quaternion look = Quaternion.LookRotation(delta.normalized, Vector3.up);
+            transform.rotation = Quaternion.Slerp(transform.rotation, look, 1f - Mathf.Exp(-6f * Time.deltaTime));
+        }
+
+        // Гравитация + движение к точке
+        if (controller.isGrounded)
+            verticalVelocity = verticalVelocity < 0f ? -2f : verticalVelocity;
+        else
+            verticalVelocity += gravity * Time.deltaTime;
+
+        float moveLen = moveSpeed * Time.deltaTime;
+        Vector3 movePlanar = dist > 0.0001f ? delta.normalized * Mathf.Min(moveLen, dist) : Vector3.zero;
+        Vector3 move = movePlanar + Vector3.up * verticalVelocity * Time.deltaTime;
+        controller.Move(move);
+
+        if (animator != null)
+        {
+            float t = moveSpeed > 1e-4f ? Mathf.Clamp01(movePlanar.magnitude / (moveSpeed * Time.deltaTime + 1e-6f)) : 0f;
+            if (walkAnimSpeedDamp > 0f)
+                animator.SetFloat("Speed", t, walkAnimSpeedDamp, Time.deltaTime);
+            else
+                animator.SetFloat("Speed", t);
+        }
+
+        if (dist <= pathArriveDistance)
+        {
+            _pathWaitLeft = Mathf.Max(0f, pathWaitSeconds);
+            _pathIndex++;
+            if (_pathIndex >= pathRoot.childCount)
+                _pathIndex = pathLoop ? 0 : pathRoot.childCount - 1;
+        }
     }
 }

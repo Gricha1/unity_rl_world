@@ -1,6 +1,7 @@
 # Training outputs / artifacts
 results/
 train_scripts/results/
+Assets/ML-Agents/weights/
 
 # Unity generated folders
 Library/

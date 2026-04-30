@@ -6,11 +6,20 @@ using UnityEngine;
 /// </summary>
 public static class BillboardIconCamera
 {
+    /// <summary>
+    /// Временная переопределённая камера (например, на время захвата кадра).
+    /// Если задана и активна — имеет приоритет над автоматическим выбором.
+    /// </summary>
+    public static Camera CaptureOverride { get; set; }
+
     /// <param name="billboardWorldPos">Мировая позиция иконки (или якорь над агентом).</param>
     /// <param name="preferred">Если задана и активна — всегда она.</param>
     /// <param name="minForwardDot">Минимальный «угол обзора»; ниже — не считаем камеру подходящей и идём в fallback.</param>
     public static Camera Resolve(Vector3 billboardWorldPos, Camera preferred, float minForwardDot = 0.05f)
     {
+        if (CaptureOverride != null && CaptureOverride.enabled && CaptureOverride.gameObject.activeInHierarchy)
+            return CaptureOverride;
+
         if (preferred != null && preferred.enabled && preferred.gameObject.activeInHierarchy)
             return preferred;
 

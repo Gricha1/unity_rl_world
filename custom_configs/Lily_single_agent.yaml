@@ -15,7 +15,7 @@ behaviors:
       learning_rate_schedule: linear
       beta_schedule: linear
       epsilon_schedule: linear
-    checkpoint_interval: 100000
+    checkpoint_interval: 50000
     network_settings:
       normalize: false
       hidden_units: 256
@@ -37,10 +37,10 @@ behaviors:
           goal_conditioning_type: hyper
           deterministic: false
     init_path: null
-    keep_checkpoints: 5
+    keep_checkpoints: 0
     even_checkpoints: false
     max_steps: 20000000
-    time_horizon: 64
+    time_horizon: 256
     summary_freq: 50000
     threaded: false
     self_play: null

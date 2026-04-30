@@ -5,54 +5,104 @@ set -o pipefail
 # Periodically runs inference validation and captures video frames.
 #
 # Usage (from train_scripts/):
-#   bash validate_video_watcher_fixed.bash <env_build_name> <run_id> <config_name> [eval_every_steps]
-#
-# Example:
-#   bash validate_video_watcher_fixed.bash jack_training.x86_64 run_001 Jack_single_agent 100000
+#   bash validate_video_watcher_fixed.bash <env_build_name> <run_id> <config_name>
 #
 # Notes:
-# - Detects checkpoints by scanning results/<run_id>/*/*-<steps>.onnx
-# - Все настройки захвата/ffmpeg — в блоке «ПАРАМЕТРЫ» ниже (не через export / окружение).
-# - Captures PNG sequences into:
-#     results/<run_id>/videos/step_<N>_camA/
-#     results/<run_id>/videos/step_<N>_camB/
-#     results/<run_id>/videos/step_<N>_jack_overhead/
-# - If ffmpeg is installed, also produces 3 mp4 files with the same suffixes.
+# - Detects checkpoints by scanning results/<run_id>/*/*-<steps>.pt
+# - Keeps output videos in results/<run_id>/videos/
 
 cd "$(dirname "$0")"
 cd ..
 
+# Ctrl+C handling: stop progress loop + mlagents-learn + Unity.
+CURRENT_ML_PID=""
+CURRENT_PROGRESS_PID=""
+cleanup_on_exit() {
+  local code=$?
+
+  if [ -n "${CURRENT_PROGRESS_PID}" ]; then
+    kill "${CURRENT_PROGRESS_PID}" 2>/dev/null || true
+    wait "${CURRENT_PROGRESS_PID}" 2>/dev/null || true
+    CURRENT_PROGRESS_PID=""
+  fi
+
+  if [ -n "${CURRENT_ML_PID}" ]; then
+    pkill -INT -P "${CURRENT_ML_PID}" 2>/dev/null || true
+    kill -INT "${CURRENT_ML_PID}" 2>/dev/null || true
+    sleep 0.3 || true
+    pkill -TERM -P "${CURRENT_ML_PID}" 2>/dev/null || true
+    kill -TERM "${CURRENT_ML_PID}" 2>/dev/null || true
+    sleep 0.3 || true
+    pkill -KILL -P "${CURRENT_ML_PID}" 2>/dev/null || true
+    kill -KILL "${CURRENT_ML_PID}" 2>/dev/null || true
+    CURRENT_ML_PID=""
+  fi
+
+  # Fallback best-effort
+  pkill -INT -f mlagents-learn 2>/dev/null || true
+  pkill -TERM -f mlagents-learn 2>/dev/null || true
+  pkill -INT -f xvfb-run 2>/dev/null || true
+  pkill -TERM -f xvfb-run 2>/dev/null || true
+
+  exit "${code}"
+}
+trap cleanup_on_exit INT TERM
+
 # ========== ПАРАМЕТРЫ (правь здесь; не через export) ==========
 FORCE_XVFB=1
-CAPTURE_EVERY=1
-CAPTURE_WIDTH=1920
-CAPTURE_HEIGHT=1080
-CAPTURE_MSAA=4
-QUIT_AFTER_SECONDS=240
+
+CAPTURE_EVERY=2
+CAPTURE_WIDTH=1280
+CAPTURE_HEIGHT=720
+CAPTURE_CAM_A=1
+CAPTURE_CAM_B=0
+CAPTURE_CAM_C=0
+CAPTURE_MSAA=1
+CAPTURE_FPS=30
+CAPTURE_SECONDS=10
+
+VIDEO_FPS_MODE=realtime
+VIDEO_FPS_FALLBACK=30
+
+QUIT_AFTER_SECONDS=999999
 QUIT_AFTER_EPISODES=0
 QUIT_DELAY_SECONDS=0.5
-MAX_EVAL_SECONDS=600
-CAPTURE_USE_META_FPS=1
-CAPTURE_VIDEO_FPS=24
+
+MAX_EVAL_SECONDS=1200
 FFMPEG_CRF=18
 FFMPEG_PRESET=medium
-EVAL_EVERY_STEPS_DEFAULT=100000
+CAPTURE_FORMAT=jpg
+CAPTURE_JPG_QUALITY=60
+
+# Папка захвата кадров.
+# Пусто ("") = писать кадры прямо в results/<run_id>/videos/step_* (предсказуемо, рядом с весами/видео).
+# Если захочешь снова быстрый диск в WSL — укажи путь типа "/tmp/forest_survival_capture".
+CAPTURE_TMP_ROOT=""
+# Удалять ли кадры после сборки mp4. Имеет смысл только если CAPTURE_TMP_ROOT не пустой.
+CLEANUP_TMP_FRAMES=0
+
+# --- Какие чекпоинты кодировать ---
+EVAL_ONLY_LATEST=0
+EVAL_LAST_N_CHECKPOINTS=0
+EVAL_ALL_CHECKPOINTS=0
+EVAL_RUN_ONCE=0
+SKIP_LATEST_K=0
 # ==============================================================
 
 if [ -z "${1:-}" ] || [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
-  echo "Usage: bash train_scripts/validate_video_watcher_fixed.bash <env_build_name> <run_id> <config_name> [eval_every_steps]"
+  echo "Usage: bash train_scripts/validate_video_watcher_fixed.bash <env_build_name> <run_id> <config_name> [only_step]"
   exit 1
 fi
 
 ENV_BUILD_NAME="$1"
 RUN_ID="$2"
 CONFIG_NAME="$3"
-EVAL_EVERY_STEPS="${4:-$EVAL_EVERY_STEPS_DEFAULT}"
+ONLY_STEP="${4:-}"
 
 BUILD_PATH="build_versions/${ENV_BUILD_NAME}"
 RESULTS_DIR="results/${RUN_ID}"
 VIDEO_ROOT="${RESULTS_DIR}/videos"
-STATE_FILE="${VIDEO_ROOT}/last_encoded_target.txt"
+TMP_EVAL_RUN_ID="${RUN_ID}__eval_tmp"
 
 mkdir -p "${VIDEO_ROOT}"
 
@@ -70,21 +120,19 @@ pick_free_port() {
   return 1
 }
 
-python_latest_checkpoint_step() {
+python_list_checkpoint_steps() {
   python - <<'PY' "$1"
 import glob, os, re, sys
 results_dir = sys.argv[1]
-
-pattern = os.path.join(results_dir, "*", "*-*.onnx")
-steps = []
+pattern = os.path.join(results_dir, "*", "*-*.pt")
+steps = set()
 for p in glob.glob(pattern):
     base = os.path.basename(p)
-    m = re.search(r"-(\d+)\.onnx$", base)
-    if not m:
-        continue
-    steps.append(int(m.group(1)))
-
-print(str(max(steps) if steps else 0))
+    m = re.search(r"-(\d+)\.pt$", base)
+    if m:
+        steps.add(int(m.group(1)))
+for s in sorted(steps):
+    print(s)
 PY
 }
 
@@ -92,37 +140,133 @@ python_has_any_checkpoint() {
   python - <<'PY' "$1"
 import glob, os, sys
 results_dir = sys.argv[1]
-pattern = os.path.join(results_dir, "*", "*-*.onnx")
+pattern = os.path.join(results_dir, "*", "*-*.pt")
 print("1" if glob.glob(pattern) else "0")
 PY
 }
 
-read_last_encoded_step() {
-  if [ -f "${STATE_FILE}" ]; then
-    cat "${STATE_FILE}" 2>/dev/null || echo "0"
-  else
-    echo "0"
-  fi
-}
+list_steps_to_eval() {
+  local raw
+  raw="$(python_list_checkpoint_steps "${RESULTS_DIR}")"
+  [ -n "${raw}" ] || return 0
 
-write_last_encoded_step() {
-  local step="$1"
-  echo "${step}" > "${STATE_FILE}"
+  if [ "${SKIP_LATEST_K}" -gt 0 ] 2>/dev/null; then
+    local count
+    count="$(echo "${raw}" | wc -l | tr -d ' ')"
+    if [ "${count}" -le "${SKIP_LATEST_K}" ]; then
+      return 0
+    fi
+    raw="$(echo "${raw}" | head -n "$((count - SKIP_LATEST_K))")"
+  fi
+
+  if [ "${EVAL_ALL_CHECKPOINTS}" = "1" ]; then
+    echo "${raw}"
+    return 0
+  fi
+  if [ "${EVAL_ONLY_LATEST}" = "1" ]; then
+    echo "${raw}" | tail -n 1
+    return 0
+  fi
+  if [ "${EVAL_LAST_N_CHECKPOINTS}" -gt 0 ] 2>/dev/null; then
+    echo "${raw}" | tail -n "${EVAL_LAST_N_CHECKPOINTS}"
+    return 0
+  fi
+  echo "${raw}"
 }
 
 already_encoded_target() {
   local step="$1"
-  local mp4a="${VIDEO_ROOT}/step_${step}_camA.mp4"
-  local mp4b="${VIDEO_ROOT}/step_${step}_camB.mp4"
-  local mp4c="${VIDEO_ROOT}/step_${step}_jack_overhead.mp4"
-  if [ -f "${mp4a}" ] && [ -f "${mp4b}" ] && [ -f "${mp4c}" ]; then
+  local ok=1
+  if [ "${CAPTURE_CAM_A}" = "1" ] && [ ! -f "${VIDEO_ROOT}/step_${step}_camA.mp4" ]; then ok=0; fi
+  if [ "${CAPTURE_CAM_B}" = "1" ] && [ ! -f "${VIDEO_ROOT}/step_${step}_camB.mp4" ]; then ok=0; fi
+  if [ "${CAPTURE_CAM_C}" = "1" ] && [ ! -f "${VIDEO_ROOT}/step_${step}_CamOnJack.mp4" ]; then ok=0; fi
+  if [ "${ok}" = "1" ]; then
     return 0
   fi
-  # If any capture started, we consider it in-progress/done for this step to avoid duplicates.
-  if [ -f "${VIDEO_ROOT}/step_${step}_camA/capture_started.txt" ] || [ -f "${VIDEO_ROOT}/step_${step}_camB/capture_started.txt" ] || [ -f "${VIDEO_ROOT}/step_${step}_jack_overhead/capture_started.txt" ]; then
-    return 0
-  fi
+  if [ "${CAPTURE_CAM_A}" = "1" ] && [ -f "${VIDEO_ROOT}/step_${step}_camA/capture_started.txt" ]; then return 0; fi
+  if [ "${CAPTURE_CAM_B}" = "1" ] && [ -f "${VIDEO_ROOT}/step_${step}_camB/capture_started.txt" ]; then return 0; fi
+  if [ "${CAPTURE_CAM_C}" = "1" ] && [ -f "${VIDEO_ROOT}/step_${step}_CamOnJack/capture_started.txt" ]; then return 0; fi
   return 1
+}
+
+python_find_checkpoint_pt_for_step() {
+  python - <<'PY' "$1" "$2"
+import glob, os, sys
+results_dir = sys.argv[1]
+target = int(sys.argv[2])
+pattern = os.path.join(results_dir, "*", "*-%d.pt" % target)
+hits = sorted(glob.glob(pattern))
+print(hits[0] if hits else "")
+PY
+}
+
+python_can_torch_load_checkpoint() {
+  python - <<'PY' "$1"
+import sys
+path = sys.argv[1]
+try:
+    import torch
+    try:
+        torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        torch.load(path, map_location="cpu")
+    print("1")
+except Exception:
+    print("0")
+PY
+}
+
+wait_for_stable_file() {
+  local f="$1"
+  local tries="${2:-20}"
+  local sleep_s="${3:-1}"
+  local prev="" cur=""
+  for _ in $(seq 1 "${tries}"); do
+    if [ ! -f "${f}" ]; then
+      sleep "${sleep_s}" || true
+      continue
+    fi
+    cur="$( (stat -c '%s' "${f}" 2>/dev/null || stat -f '%z' "${f}" 2>/dev/null || echo "") | tr -d '\r' )"
+    if [ -n "${cur}" ] && [ "${cur}" = "${prev}" ] && [ "${cur}" != "0" ]; then
+      return 0
+    fi
+    prev="${cur}"
+    sleep "${sleep_s}" || true
+  done
+  return 1
+}
+
+prepare_inference_run_for_step() {
+  local step="$1"
+  local src_pt
+  src_pt="$(python_find_checkpoint_pt_for_step "${RESULTS_DIR}" "${step}")"
+  if [ -z "${src_pt}" ]; then
+    echo "[watcher] ERROR: no .pt checkpoint found for step=${step}"
+    return 1
+  fi
+  if ! wait_for_stable_file "${src_pt}" 20 1; then
+    echo "[watcher] WARN: checkpoint file not stable yet (maybe being written). step=${step}"
+    return 1
+  fi
+
+  local tmp_dir="results/${TMP_EVAL_RUN_ID}"
+  local behavior_name
+  behavior_name="$(basename "$(dirname "${src_pt}")")"
+  mkdir -p "${tmp_dir}/${behavior_name}"
+  rm -f "${tmp_dir}/${behavior_name}/checkpoint.pt" 2>/dev/null || true
+
+  local dst_pt="${tmp_dir}/${behavior_name}/checkpoint.pt"
+  local dst_tmp="${dst_pt}.tmp"
+  rm -f "${dst_tmp}" 2>/dev/null || true
+  cp -f "${src_pt}" "${dst_tmp}"
+  if [ "$(python_can_torch_load_checkpoint "${dst_tmp}")" != "1" ]; then
+    rm -f "${dst_tmp}" 2>/dev/null || true
+    echo "[watcher] WARN: torch.load failed for step=${step} (checkpoint likely incomplete/corrupt). Will retry later."
+    return 1
+  fi
+  mv -f "${dst_tmp}" "${dst_pt}"
+
+  echo "${TMP_EVAL_RUN_ID}"
 }
 
 run_eval_for_step() {
@@ -130,86 +274,173 @@ run_eval_for_step() {
   local pot
   pot="$(pick_free_port)"
 
-  local step_di_a="${VIDEO_ROOT}/step_${step}_camA"
-  local step_di_b="${VIDEO_ROOT}/step_${step}_camB"
-  local step_di_c="${VIDEO_ROOT}/step_${step}_jack_overhead"
-  # Make absolute paths for Unity (relative paths depend on its working directory).
-  if command -v realpath >/dev/null 2>&1; then
-    step_di_a="$(realpath "${step_di_a}")"
-    step_di_b="$(realpath "${step_di_b}")"
-    step_di_c="$(realpath "${step_di_c}")"
+  local meta_di_a="${VIDEO_ROOT}/step_${step}_camA"
+  local meta_di_b="${VIDEO_ROOT}/step_${step}_camB"
+  local meta_di_c="${VIDEO_ROOT}/step_${step}_CamOnJack"
+
+  local cap_di_a="${meta_di_a}"
+  local cap_di_b="${meta_di_b}"
+  local cap_di_c="${meta_di_c}"
+  if [ -n "${CAPTURE_TMP_ROOT}" ]; then
+    cap_di_a="${CAPTURE_TMP_ROOT}/${RUN_ID}/step_${step}_camA"
+    cap_di_b="${CAPTURE_TMP_ROOT}/${RUN_ID}/step_${step}_camB"
+    cap_di_c="${CAPTURE_TMP_ROOT}/${RUN_ID}/step_${step}_CamOnJack"
   fi
-  mkdir -p "${step_di_a}"
-  mkdir -p "${step_di_b}"
-  mkdir -p "${step_di_c}"
+
+  if command -v realpath >/dev/null 2>&1; then
+    meta_di_a="$(realpath "${meta_di_a}")"
+    meta_di_b="$(realpath "${meta_di_b}")"
+    meta_di_c="$(realpath "${meta_di_c}")"
+    cap_di_a="$(realpath -m "${cap_di_a}" 2>/dev/null || realpath "${cap_di_a}")"
+    cap_di_b="$(realpath -m "${cap_di_b}" 2>/dev/null || realpath "${cap_di_b}")"
+    cap_di_c="$(realpath -m "${cap_di_c}" 2>/dev/null || realpath "${cap_di_c}")"
+  fi
+
+  if [ "${CAPTURE_CAM_A}" = "1" ]; then mkdir -p "${meta_di_a}" "${cap_di_a}"; fi
+  if [ "${CAPTURE_CAM_B}" = "1" ]; then mkdir -p "${meta_di_b}" "${cap_di_b}"; fi
+  if [ "${CAPTURE_CAM_C}" = "1" ]; then mkdir -p "${meta_di_c}" "${cap_di_c}"; fi
 
   echo "[watcher] validate target step=${step} on port=${pot}"
+  local target_frames
+  target_frames="$(( (CAPTURE_FPS * CAPTURE_SECONDS + CAPTURE_EVERY - 1) / CAPTURE_EVERY ))"
+  echo "[watcher] target capture frames=${target_frames} (fps=${CAPTURE_FPS} seconds=${CAPTURE_SECONDS} every=${CAPTURE_EVERY})"
 
-  local env_args=(
-    --capture-dir "${step_di_a}" --capture-camera-a "CamA"
-    --capture-dir-b "${step_di_b}" --capture-camera-b "CamB"
-    --capture-dir-c "${step_di_c}"
+  local env_args=()
+  if [ "${CAPTURE_CAM_A}" = "1" ]; then
+    env_args+=(--capture-dir "${cap_di_a}" --capture-camera-a "CamA")
+  fi
+  if [ "${CAPTURE_CAM_B}" = "1" ]; then
+    env_args+=(--capture-dir-b "${cap_di_b}" --capture-camera-b "CamB")
+  fi
+  if [ "${CAPTURE_CAM_C}" = "1" ]; then
+    env_args+=(--capture-dir-c "${cap_di_c}" --capture-camera-c "CamOnJack")
+  fi
+  env_args+=(
     --capture-every "${CAPTURE_EVERY}"
     --capture-width "${CAPTURE_WIDTH}"
     --capture-height "${CAPTURE_HEIGHT}"
     --capture-msaa "${CAPTURE_MSAA}"
+    --capture-format "${CAPTURE_FORMAT}"
+    --capture-jpg-quality "${CAPTURE_JPG_QUALITY}"
+    --capture-fps "${CAPTURE_FPS}"
+    --quit-after-capture-frames "${target_frames}"
     --quit-after-episodes "${QUIT_AFTER_EPISODES}"
     --quit-after-seconds "${QUIT_AFTER_SECONDS}"
     --quit-delay-seconds "${QUIT_DELAY_SECONDS}"
   )
 
+  local inference_run_id=""
+  if ! inference_run_id="$(prepare_inference_run_for_step "${step}")"; then
+    echo "[watcher] WARN: cannot prepare checkpoint for step=${step}. Will retry later."
+    return 0
+  fi
+
+  if [ "${CAPTURE_CAM_A}" = "1" ]; then date -Is > "${meta_di_a}/capture_started.txt" 2>/dev/null || true; fi
+  if [ "${CAPTURE_CAM_B}" = "1" ]; then date -Is > "${meta_di_b}/capture_started.txt" 2>/dev/null || true; fi
+  if [ "${CAPTURE_CAM_C}" = "1" ]; then date -Is > "${meta_di_c}/capture_started.txt" 2>/dev/null || true; fi
+
   local mlagents_cmd=(mlagents-learn "custom_configs/${CONFIG_NAME}.yaml"
     --inference
     --resume
     --env="${BUILD_PATH}"
-    --run-id "${RUN_ID}"
+    --run-id "${inference_run_id}"
     --base-port "${pot}"
     --num-envs 1
     --timeout-wait 600
     --env-args "${env_args[@]}"
   )
 
+  count_frames_in_dir() {
+    local d="$1"
+    shopt -s nullglob
+    local a=("$d"/frame_*.jpg)
+    local b=("$d"/frame_*.png)
+    shopt -u nullglob
+    echo "$(( ${#a[@]} + ${#b[@]} ))"
+  }
+
+  local start_ts
+  start_ts="$(date +%s 2>/dev/null || echo 0)"
+
+  # Periodic progress so it doesn't look "stuck".
+  local progress_pid=""
+  (
+    while true; do
+      sleep 10 || exit 0
+      local now_ts elapsed_s ca cb cc
+      now_ts="$(date +%s 2>/dev/null || echo 0)"
+      elapsed_s=$(( now_ts - start_ts ))
+      ca="0"; cb="0"; cc="0"
+      if [ "${CAPTURE_CAM_A}" = "1" ]; then ca="$(count_frames_in_dir "${cap_di_a}")"; fi
+      if [ "${CAPTURE_CAM_B}" = "1" ]; then cb="$(count_frames_in_dir "${cap_di_b}")"; fi
+      if [ "${CAPTURE_CAM_C}" = "1" ]; then cc="$(count_frames_in_dir "${cap_di_c}")"; fi
+      echo "[watcher] progress step=${step}: t=${elapsed_s}s frames camA=${ca} camB=${cb} overhead=${cc} / target=${target_frames}"
+
+      # Hard stop once enough frames are captured.
+      # Unity may already have exited, but mlagents can keep running and "restart worker" forever.
+      if [ "${CAPTURE_CAM_A}" = "1" ] && [ "${ca}" -ge "${target_frames}" ] 2>/dev/null; then
+        echo "[watcher] reached target frames camA=${ca}/${target_frames} — stopping eval run."
+        if [ -n "${CURRENT_ML_PID}" ]; then
+          pkill -INT -P "${CURRENT_ML_PID}" 2>/dev/null || true
+          kill -INT "${CURRENT_ML_PID}" 2>/dev/null || true
+        fi
+        exit 0
+      fi
+    done
+  ) &
+  progress_pid="$!"
+  CURRENT_PROGRESS_PID="${progress_pid}"
+
   if [ "${FORCE_XVFB}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
     echo "[watcher] running inference under xvfb-run (FORCE_XVFB=1)"
-    timeout --signal=INT "${MAX_EVAL_SECONDS}" xvfb-run -a "${mlagents_cmd[@]}" || true
+    if [ "${MAX_EVAL_SECONDS}" -le 0 ]; then
+      PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" xvfb-run -a "${mlagents_cmd[@]}" &
+      CURRENT_ML_PID="$!"
+      wait "${CURRENT_ML_PID}" || true
+      CURRENT_ML_PID=""
+    else
+      PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" timeout --signal=INT "${MAX_EVAL_SECONDS}" xvfb-run -a "${mlagents_cmd[@]}" &
+      CURRENT_ML_PID="$!"
+      wait "${CURRENT_ML_PID}" || true
+      CURRENT_ML_PID=""
+    fi
   else
     if [ -z "${DISPLAY:-}" ]; then
       echo "[watcher] ERROR: DISPLAY is empty and FORCE_XVFB=0. Cannot render/capture video."
       return 1
     fi
     echo "[watcher] running inference with DISPLAY=${DISPLAY} (FORCE_XVFB=0)"
-    timeout --signal=INT "${MAX_EVAL_SECONDS}" "${mlagents_cmd[@]}" || true
+    if [ "${MAX_EVAL_SECONDS}" -le 0 ]; then
+      PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" "${mlagents_cmd[@]}" &
+      CURRENT_ML_PID="$!"
+      wait "${CURRENT_ML_PID}" || true
+      CURRENT_ML_PID=""
+    else
+      PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" timeout --signal=INT "${MAX_EVAL_SECONDS}" "${mlagents_cmd[@]}" &
+      CURRENT_ML_PID="$!"
+      wait "${CURRENT_ML_PID}" || true
+      CURRENT_ML_PID=""
+    fi
   fi
 
-  ffmpeg_fps_from_meta() {
-    local cap_dir="$1"
-    local meta="${cap_dir}/capture_meta.txt"
-    [ -f "$meta" ] || { echo ""; return; }
-    local wall frames
-    wall=$(grep -E '^wall_seconds=' "$meta" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
-    frames=$(grep -E '^frame_count=' "$meta" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
-    [ -n "$wall" ] && [ -n "$frames" ] || { echo ""; return; }
-    awk -v w="$wall" -v f="$frames" 'BEGIN {
-      if (w > 0.05 && f > 0) {
-        x = f / w
-        if (x > 60) x = 60
-        if (x < 5) x = 5
-        printf "%.6f", x
-      }
-    }'
-  }
+  if [ -n "${progress_pid}" ]; then
+    kill "${progress_pid}" 2>/dev/null || true
+    wait "${progress_pid}" 2>/dev/null || true
+  fi
+  CURRENT_PROGRESS_PID=""
 
-  pick_ffmpeg_fps() {
-    local cap_dir="$1"
-    local fps=""
-    if [ "${CAPTURE_USE_META_FPS}" = "1" ]; then
-      fps="$(ffmpeg_fps_from_meta "$cap_dir")"
-    fi
-    if [ -z "$fps" ]; then
-      fps="${CAPTURE_VIDEO_FPS}"
-    fi
-    echo "$fps"
-  }
+  local fa fb fc
+  fa="0"; fb="0"; fc="0"
+  if [ "${CAPTURE_CAM_A}" = "1" ]; then fa="$(count_frames_in_dir "${cap_di_a}")"; fi
+  if [ "${CAPTURE_CAM_B}" = "1" ]; then fb="$(count_frames_in_dir "${cap_di_b}")"; fi
+  if [ "${CAPTURE_CAM_C}" = "1" ]; then fc="$(count_frames_in_dir "${cap_di_c}")"; fi
+  echo "[watcher] finished step=${step} frames: camA=${fa} camB=${fb} overhead=${fc}"
+
+  if [ "${CAPTURE_CAM_A}" = "1" ] && [ "${fa}" = "0" ]; then
+    rm -f "${meta_di_a}/capture_started.txt" 2>/dev/null || true
+    rm -f "${VIDEO_ROOT}/step_${step}_camA.mp4" 2>/dev/null || true
+    echo "[watcher] WARN: camA captured 0 frames (inference likely crashed). Will allow retry on next scan."
+  fi
 
   if command -v ffmpeg >/dev/null 2>&1; then
     pick_frame_ext() {
@@ -221,36 +452,67 @@ run_eval_for_step() {
       fi
     }
 
-    local ff_fps_a ff_fps_b ff_fps_c
-    ff_fps_a="$(pick_ffmpeg_fps "${step_di_a}")"
-    ff_fps_b="$(pick_ffmpeg_fps "${step_di_b}")"
-    ff_fps_c="$(pick_ffmpeg_fps "${step_di_c}")"
-    echo "[watcher] ffmpeg fps camA=${ff_fps_a} camB=${ff_fps_b} overhead=${ff_fps_c} (meta=${CAPTURE_USE_META_FPS}, fallback=${CAPTURE_VIDEO_FPS})"
+    fps_from_meta() {
+      local cap_dir="$1"
+      local meta="${cap_dir}/capture_meta.txt"
+      [ -f "$meta" ] || { echo ""; return; }
+      local wall frames
+      wall=$(grep -E '^wall_seconds=' "$meta" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
+      frames=$(grep -E '^frame_count=' "$meta" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '\r')
+      [ -n "$wall" ] && [ -n "$frames" ] || { echo ""; return; }
+      awk -v w="$wall" -v f="$frames" 'BEGIN {
+        if (w > 0.05 && f > 0) {
+          x = f / w
+          if (x > 120) x = 120
+          if (x < 1) x = 1
+          printf "%.6f", x
+        }
+      }'
+    }
+
+    pick_video_fps() {
+      local cap_dir="$1"
+      if [ "${VIDEO_FPS_MODE}" = "fixed" ]; then
+        echo "${CAPTURE_FPS}"
+        return
+      fi
+      local fps
+      fps="$(fps_from_meta "$cap_dir")"
+      if [ -n "$fps" ]; then
+        echo "$fps"
+      else
+        echo "${VIDEO_FPS_FALLBACK}"
+      fi
+    }
+
+    local fps_a fps_b fps_c
+    fps_a=""; fps_b=""; fps_c=""
+    if [ "${CAPTURE_CAM_A}" = "1" ]; then fps_a="$(pick_video_fps "${cap_di_a}")"; fi
+    if [ "${CAPTURE_CAM_B}" = "1" ]; then fps_b="$(pick_video_fps "${cap_di_b}")"; fi
+    if [ "${CAPTURE_CAM_C}" = "1" ]; then fps_c="$(pick_video_fps "${cap_di_c}")"; fi
+    echo "[watcher] ffmpeg fps camA=${fps_a:-off} camB=${fps_b:-off} overhead=${fps_c:-off}"
 
     local ext_a ext_b ext_c
-    ext_a="$(pick_frame_ext "${step_di_a}")"
-    ext_b="$(pick_frame_ext "${step_di_b}")"
-    ext_c="$(pick_frame_ext "${step_di_c}")"
-    echo "[watcher] frame ext camA=${ext_a} camB=${ext_b} overhead=${ext_c}"
+    ext_a=""; ext_b=""; ext_c=""
+    if [ "${CAPTURE_CAM_A}" = "1" ]; then ext_a="$(pick_frame_ext "${cap_di_a}")"; fi
+    if [ "${CAPTURE_CAM_B}" = "1" ]; then ext_b="$(pick_frame_ext "${cap_di_b}")"; fi
+    if [ "${CAPTURE_CAM_C}" = "1" ]; then ext_c="$(pick_frame_ext "${cap_di_c}")"; fi
+    echo "[watcher] frame ext camA=${ext_a:-off} camB=${ext_b:-off} overhead=${ext_c:-off}"
 
-    local out_mp4_a="${VIDEO_ROOT}/step_${step}_camA.mp4"
-    ffmpeg -y -framerate "${ff_fps_a}" -i "${step_di_a}/frame_%06d.${ext_a}" -c:v libx264 -pix_fmt yuv420p -crf "${FFMPEG_CRF}" -preset "${FFMPEG_PRESET}" "${out_mp4_a}" >/dev/null 2>&1 || true
-    echo "[watcher] saved ${out_mp4_a}"
-
-    local out_mp4_b="${VIDEO_ROOT}/step_${step}_camB.mp4"
-    ffmpeg -y -framerate "${ff_fps_b}" -i "${step_di_b}/frame_%06d.${ext_b}" -c:v libx264 -pix_fmt yuv420p -crf "${FFMPEG_CRF}" -preset "${FFMPEG_PRESET}" "${out_mp4_b}" >/dev/null 2>&1 || true
-    echo "[watcher] saved ${out_mp4_b}"
-
-    local out_mp4_c="${VIDEO_ROOT}/step_${step}_jack_overhead.mp4"
-    ffmpeg -y -framerate "${ff_fps_c}" -i "${step_di_c}/frame_%06d.${ext_c}" -c:v libx264 -pix_fmt yuv420p -crf "${FFMPEG_CRF}" -preset "${FFMPEG_PRESET}" "${out_mp4_c}" >/dev/null 2>&1 || true
-    echo "[watcher] saved ${out_mp4_c}"
+    if [ "${CAPTURE_CAM_A}" = "1" ] && [ "${fa}" != "0" ]; then
+      local out_mp4_a="${VIDEO_ROOT}/step_${step}_camA.mp4"
+      ffmpeg -y -framerate "${fps_a}" -i "${cap_di_a}/frame_%06d.${ext_a}" -c:v libx264 -pix_fmt yuv420p -crf "${FFMPEG_CRF}" -preset "${FFMPEG_PRESET}" "${out_mp4_a}" >/dev/null 2>&1 || true
+      echo "[watcher] saved ${out_mp4_a}"
+      if [ "${CLEANUP_TMP_FRAMES}" = "1" ] && [ -n "${CAPTURE_TMP_ROOT}" ]; then
+        rm -rf "${cap_di_a}" 2>/dev/null || true
+      fi
+    fi
   else
-    echo "[watcher] ffmpeg not found; kept PNGs in ${step_di_a}, ${step_di_b}, ${step_di_c}"
+    echo "[watcher] ffmpeg not found"
   fi
 }
 
 echo "[watcher] scanning checkpoints in ${RESULTS_DIR}"
-echo "[watcher] eval interval ${EVAL_EVERY_STEPS} steps (checkpoint steps may be ~, not exact)"
 
 while true; do
   if [ "$(python_has_any_checkpoint "${RESULTS_DIR}")" != "1" ]; then
@@ -258,26 +520,21 @@ while true; do
     continue
   fi
 
-  latest_step="$(python_latest_checkpoint_step "${RESULTS_DIR}")"
-  if [ "${latest_step}" -gt 0 ]; then
-    last_target="$(read_last_encoded_step)"
-    if [ "${last_target}" -le 0 ]; then
-      last_target="0"
+  while read -r step; do
+    [ -n "${step}" ] || continue
+    if [ -n "${ONLY_STEP}" ] && [ "${step}" != "${ONLY_STEP}" ]; then
+      continue
     fi
+    if ! already_encoded_target "${step}"; then
+      run_eval_for_step "${step}"
+    else
+      echo "[watcher] skip step_${step} (already encoded)"
+    fi
+  done < <(list_steps_to_eval)
 
-    max_target=$(( (latest_step / EVAL_EVERY_STEPS) * EVAL_EVERY_STEPS ))
-    target=$((last_target + EVAL_EVERY_STEPS))
-
-    # Backfill: un fo all missing tagets up to latest_step.
-    while [ "${target}" -le "${max_target}" ]; do
-      if ! already_encoded_target "${target}"; then
-        run_eval_for_step "${target}"
-      else
-        echo "[watcher] skip step_${target} (already encoded)"
-      fi
-      write_last_encoded_step "${target}"
-      target=$((target + EVAL_EVERY_STEPS))
-    done
+  if [ "${EVAL_RUN_ONCE}" = "1" ]; then
+    echo "[watcher] EVAL_RUN_ONCE=1 — done, exiting."
+    break
   fi
 
   sleep 20

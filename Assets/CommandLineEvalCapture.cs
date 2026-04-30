@@ -23,12 +23,15 @@ using UnityEngine;
 ///   --quit-after-steps <n>       Quit after n Academy steps (default: disabled)
 ///   --quit-after-episodes <n>    Quit after n completed episodes (0 = disabled; requires agent integration)
 ///   --quit-after-seconds <s>     Quit after s real-time seconds (works even if Academy doesn't step)
+///   --quit-after-capture-frames <n>  Quit after saving n frames per fastest active capture stream (see Update)
 ///   --quit-delay-seconds <s>     Delay before quitting to allow final frame writes (default: 0.5)
 /// </summary>
 public sealed class CommandLineEvalCapture : MonoBehaviour
 {
-    // Для валидации видео важнее стабильная частота кадров, чем скорость симуляции.
-    private const int CaptureTargetFps = 30;
+    // Для валидации видео важнее качество тайминга, чем скорость wall-time.
+    // Time.captureFramerate заставляет Unity шагать время ровно 1/fps за кадр, даже если рендер/запись медленные.
+    private int _captureFps = 30;
+    private int _quitAfterCaptureFrames = -1;
     private string _captureDir;
     private string _captureDirB;
     private string _captureDirC;
@@ -54,6 +57,7 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
     private long _startStep = -1;
     private bool _quitScheduled;
     private float _startRealtime = -1f;
+    private float _lastCaptureProgressLogWall = -1f;
     private Camera _cameraA;
     private Camera _cameraB;
     private Camera _cameraC;
@@ -75,10 +79,14 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
             var args = Environment.GetCommandLineArgs();
             if (args == null || args.Length == 0) return;
 
-            // Only create the helper if any of the supported flags are present.
+            // Only create the helper if any supported flag is present (order-independent).
             for (var i = 0; i < args.Length; i++)
             {
-                if (args[i] == "--capture-dir" || args[i] == "--capture-dir-b" || args[i] == "--capture-dir-c" || args[i] == "--quit-after-steps")
+                var a = args[i];
+                if (a == "--capture-dir" || a == "--capture-dir-b" || a == "--capture-dir-c"
+                    || a == "--quit-after-steps" || a == "--quit-after-capture-frames"
+                    || a == "--quit-after-episodes" || a == "--quit-after-seconds"
+                    || a == "--capture-every" || a == "--capture-fps")
                 {
                     var go = new GameObject(nameof(CommandLineEvalCapture));
                     DontDestroyOnLoad(go);
@@ -97,14 +105,13 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
     {
         ParseArgs(Environment.GetCommandLineArgs());
 
-        // Стабилизируем рендер-кадры, чтобы видео не было «ускоренным» и не заканчивалось слишком быстро
-        // из-за чрезмерно высокой частоты кадров/симуляции.
+        // Для захвата делаем детерминированный тайминг: 1 кадр = 1/fps секунды игрового времени.
+        // Это НЕ "замедляет" видео — оно будет ровно fps, просто генерация может идти долго по wall-time.
         if (!string.IsNullOrWhiteSpace(_captureDir)
             || !string.IsNullOrWhiteSpace(_captureDirB)
             || !string.IsNullOrWhiteSpace(_captureDirC))
         {
-            QualitySettings.vSyncCount = 0;
-            Application.targetFrameRate = CaptureTargetFps;
+            Time.captureFramerate = Mathf.Clamp(_captureFps, 1, 240);
             Time.timeScale = 1f;
         }
 
@@ -171,6 +178,31 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
             if (_renderFrameCounter % Math.Max(1, _captureEvery) == 0)
             {
                 CaptureFrames();
+            }
+        }
+
+        // Ограничение по количеству сохранённых кадров: гарантирует длительность видео (frames / fps).
+        if (_quitAfterCaptureFrames > 0 && !_quitScheduled)
+        {
+            int frames = Mathf.Max(_frameIndexA, Mathf.Max(_frameIndexB, _frameIndexC));
+            if (frames >= _quitAfterCaptureFrames)
+            {
+                _quitScheduled = true;
+                Invoke(nameof(Quit), Mathf.Max(0f, _quitDelaySeconds));
+            }
+        }
+
+        // Wall-time progress: game time is paced by captureFramerate, but JPEG+IO can be much slower than real-time.
+        if (_quitAfterCaptureFrames > 0 && !_quitScheduled && _startRealtime >= 0f)
+        {
+            var wall = Time.realtimeSinceStartup - _startRealtime;
+            if (_lastCaptureProgressLogWall < 0f || wall - _lastCaptureProgressLogWall >= 120f)
+            {
+                _lastCaptureProgressLogWall = wall;
+                var maxIdx = Mathf.Max(_frameIndexA, Mathf.Max(_frameIndexB, _frameIndexC));
+                Debug.Log(
+                    $"[CommandLineEvalCapture] capture progress wall_s={wall:F0} max_frames={maxIdx} " +
+                    $"(A={_frameIndexA} B={_frameIndexB} C={_frameIndexC}) target_frames={_quitAfterCaptureFrames}");
             }
         }
 
@@ -331,12 +363,12 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
 
     private void EnsureJackThirdPersonCameraB()
     {
-        // If a named camera B was requested and exists, don't override it.
+        // If a named camera B was requested: never auto-create cameras. Use only what's in the scene.
         if (!string.IsNullOrWhiteSpace(_cameraBName))
         {
             if (_cameraB != null) return;
             ResolveCameras();
-            if (_cameraB != null) return;
+            return;
         }
 
         if (_thirdPersonCameraB == null)
@@ -379,12 +411,12 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
 
     private void EnsureJackOverheadCameraC()
     {
-        // If a named camera C was requested and exists, don't override it.
+        // If a named camera C was requested: never auto-create cameras. Use only what's in the scene.
         if (!string.IsNullOrWhiteSpace(_cameraCName))
         {
             if (_cameraC != null) return;
             ResolveCameras();
-            if (_cameraC != null) return;
+            return;
         }
 
         if (_jackOverheadCameraC == null)
@@ -428,11 +460,15 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         var prevTarget = camera.targetTexture;
         var prevActive = RenderTexture.active;
 
+        // Важно: во время рендера конкретной камеры заставляем billboard-иконки смотреть именно в неё,
+        // иначе на CamB они будут развёрнуты на CamA.
+        BillboardIconCamera.CaptureOverride = camera;
         camera.targetTexture = _captureRt;
         camera.Render();
         RenderTexture.active = _captureRt;
         _captureTexture.ReadPixels(new Rect(0, 0, _captureWidth, _captureHeight), 0, 0);
         _captureTexture.Apply(false, false);
+        BillboardIconCamera.CaptureOverride = null;
 
         camera.targetTexture = prevTarget;
         RenderTexture.active = prevActive;
@@ -513,6 +549,16 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         if (dict.TryGetValue("--capture-msaa", out var msaaStr) && int.TryParse(msaaStr, out var msaa))
         {
             _captureMsaa = Mathf.Clamp(msaa, 1, 8);
+        }
+
+        if (dict.TryGetValue("--capture-fps", out var fpsStr) && int.TryParse(fpsStr, out var fps))
+        {
+            _captureFps = Mathf.Clamp(fps, 1, 240);
+        }
+
+        if (dict.TryGetValue("--quit-after-capture-frames", out var qfStr) && int.TryParse(qfStr, out var qf))
+        {
+            _quitAfterCaptureFrames = qf <= 0 ? -1 : Mathf.Max(1, qf);
         }
 
         if (dict.TryGetValue("--capture-format", out var fmt) && !string.IsNullOrWhiteSpace(fmt))
