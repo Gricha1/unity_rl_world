@@ -16,6 +16,7 @@ cd ..
 
 # Ctrl+C handling: stop progress loop + mlagents-learn + Unity.
 CURRENT_ML_PID=""
+CURRENT_PGID=""
 CURRENT_PROGRESS_PID=""
 cleanup_on_exit() {
   local code=$?
@@ -26,7 +27,16 @@ cleanup_on_exit() {
     CURRENT_PROGRESS_PID=""
   fi
 
-  if [ -n "${CURRENT_ML_PID}" ]; then
+  # Kill whole process group if we started one (most reliable).
+  if [ -n "${CURRENT_PGID}" ]; then
+    kill -INT -- "-${CURRENT_PGID}" 2>/dev/null || true
+    sleep 0.3 || true
+    kill -TERM -- "-${CURRENT_PGID}" 2>/dev/null || true
+    sleep 0.3 || true
+    kill -KILL -- "-${CURRENT_PGID}" 2>/dev/null || true
+    CURRENT_PGID=""
+    CURRENT_ML_PID=""
+  elif [ -n "${CURRENT_ML_PID}" ]; then
     pkill -INT -P "${CURRENT_ML_PID}" 2>/dev/null || true
     kill -INT "${CURRENT_ML_PID}" 2>/dev/null || true
     sleep 0.3 || true
@@ -51,7 +61,7 @@ trap cleanup_on_exit INT TERM
 # ========== ПАРАМЕТРЫ (правь здесь; не через export) ==========
 FORCE_XVFB=1
 
-CAPTURE_EVERY=2
+CAPTURE_EVERY=1
 CAPTURE_WIDTH=1280
 CAPTURE_HEIGHT=720
 CAPTURE_CAM_A=1
@@ -362,6 +372,43 @@ run_eval_for_step() {
   local start_ts
   start_ts="$(date +%s 2>/dev/null || echo 0)"
 
+  # Start mlagents/Unity first so we have PGID available for the progress sub-shell.
+  local pgid_file
+  pgid_file="${VIDEO_ROOT}/.watcher_pgid_step_${step}.txt"
+  rm -f "${pgid_file}" 2>/dev/null || true
+
+  if [ "${FORCE_XVFB}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
+    echo "[watcher] running inference under xvfb-run (FORCE_XVFB=1)"
+    if [ "${MAX_EVAL_SECONDS}" -le 0 ]; then
+      setsid env PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" xvfb-run -a "${mlagents_cmd[@]}" &
+      CURRENT_ML_PID="$!"
+      CURRENT_PGID="$!"
+      echo "${CURRENT_PGID}" > "${pgid_file}" 2>/dev/null || true
+    else
+      setsid env PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" timeout --signal=INT "${MAX_EVAL_SECONDS}" xvfb-run -a "${mlagents_cmd[@]}" &
+      CURRENT_ML_PID="$!"
+      CURRENT_PGID="$!"
+      echo "${CURRENT_PGID}" > "${pgid_file}" 2>/dev/null || true
+    fi
+  else
+    if [ -z "${DISPLAY:-}" ]; then
+      echo "[watcher] ERROR: DISPLAY is empty and FORCE_XVFB=0. Cannot render/capture video."
+      return 1
+    fi
+    echo "[watcher] running inference with DISPLAY=${DISPLAY} (FORCE_XVFB=0)"
+    if [ "${MAX_EVAL_SECONDS}" -le 0 ]; then
+      setsid env PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" "${mlagents_cmd[@]}" &
+      CURRENT_ML_PID="$!"
+      CURRENT_PGID="$!"
+      echo "${CURRENT_PGID}" > "${pgid_file}" 2>/dev/null || true
+    else
+      setsid env PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" timeout --signal=INT "${MAX_EVAL_SECONDS}" "${mlagents_cmd[@]}" &
+      CURRENT_ML_PID="$!"
+      CURRENT_PGID="$!"
+      echo "${CURRENT_PGID}" > "${pgid_file}" 2>/dev/null || true
+    fi
+  fi
+
   # Periodic progress so it doesn't look "stuck".
   local progress_pid=""
   (
@@ -376,13 +423,16 @@ run_eval_for_step() {
       if [ "${CAPTURE_CAM_C}" = "1" ]; then cc="$(count_frames_in_dir "${cap_di_c}")"; fi
       echo "[watcher] progress step=${step}: t=${elapsed_s}s frames camA=${ca} camB=${cb} overhead=${cc} / target=${target_frames}"
 
-      # Hard stop once enough frames are captured.
-      # Unity may already have exited, but mlagents can keep running and "restart worker" forever.
       if [ "${CAPTURE_CAM_A}" = "1" ] && [ "${ca}" -ge "${target_frames}" ] 2>/dev/null; then
         echo "[watcher] reached target frames camA=${ca}/${target_frames} — stopping eval run."
-        if [ -n "${CURRENT_ML_PID}" ]; then
-          pkill -INT -P "${CURRENT_ML_PID}" 2>/dev/null || true
-          kill -INT "${CURRENT_ML_PID}" 2>/dev/null || true
+        local pgid=""
+        pgid="$(cat "${pgid_file}" 2>/dev/null || true)"
+        if [ -n "${pgid}" ]; then
+          kill -INT -- "-${pgid}" 2>/dev/null || true
+          sleep 0.3 || true
+          kill -TERM -- "-${pgid}" 2>/dev/null || true
+          sleep 0.3 || true
+          kill -KILL -- "-${pgid}" 2>/dev/null || true
         fi
         exit 0
       fi
@@ -391,43 +441,19 @@ run_eval_for_step() {
   progress_pid="$!"
   CURRENT_PROGRESS_PID="${progress_pid}"
 
-  if [ "${FORCE_XVFB}" = "1" ] && command -v xvfb-run >/dev/null 2>&1; then
-    echo "[watcher] running inference under xvfb-run (FORCE_XVFB=1)"
-    if [ "${MAX_EVAL_SECONDS}" -le 0 ]; then
-      PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" xvfb-run -a "${mlagents_cmd[@]}" &
-      CURRENT_ML_PID="$!"
-      wait "${CURRENT_ML_PID}" || true
-      CURRENT_ML_PID=""
-    else
-      PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" timeout --signal=INT "${MAX_EVAL_SECONDS}" xvfb-run -a "${mlagents_cmd[@]}" &
-      CURRENT_ML_PID="$!"
-      wait "${CURRENT_ML_PID}" || true
-      CURRENT_ML_PID=""
-    fi
-  else
-    if [ -z "${DISPLAY:-}" ]; then
-      echo "[watcher] ERROR: DISPLAY is empty and FORCE_XVFB=0. Cannot render/capture video."
-      return 1
-    fi
-    echo "[watcher] running inference with DISPLAY=${DISPLAY} (FORCE_XVFB=0)"
-    if [ "${MAX_EVAL_SECONDS}" -le 0 ]; then
-      PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" "${mlagents_cmd[@]}" &
-      CURRENT_ML_PID="$!"
-      wait "${CURRENT_ML_PID}" || true
-      CURRENT_ML_PID=""
-    else
-      PYTHONUNBUFFERED=1 PYTHONWARNINGS="ignore::FutureWarning" timeout --signal=INT "${MAX_EVAL_SECONDS}" "${mlagents_cmd[@]}" &
-      CURRENT_ML_PID="$!"
-      wait "${CURRENT_ML_PID}" || true
-      CURRENT_ML_PID=""
-    fi
+  # Wait for the run to finish (either naturally or because progress loop killed the PGID).
+  if [ -n "${CURRENT_ML_PID}" ]; then
+    wait "${CURRENT_ML_PID}" || true
   fi
+  CURRENT_ML_PID=""
+  CURRENT_PGID=""
 
   if [ -n "${progress_pid}" ]; then
     kill "${progress_pid}" 2>/dev/null || true
     wait "${progress_pid}" 2>/dev/null || true
   fi
   CURRENT_PROGRESS_PID=""
+  rm -f "${pgid_file}" 2>/dev/null || true
 
   local fa fb fc
   fa="0"; fb="0"; fc="0"
