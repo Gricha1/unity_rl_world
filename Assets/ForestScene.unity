@@ -19366,7 +19366,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &1031344719
 RectTransform:
   m_ObjectHideFlags: 0
@@ -25122,7 +25122,7 @@ PrefabInstance:
     - target: {fileID: 5016354465868146490, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: m_Model
       value: 
-      objectReference: {fileID: 5022602860645237092, guid: dbd8052b9578d754995bf176935af76b, type: 3}
+      objectReference: {fileID: 0}
     - target: {fileID: 5016354465868146490, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: m_BehaviorType
       value: 2
@@ -35276,7 +35276,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 4342427395114140049, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: m_IsActive
-      value: 1
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 4365860666371578488, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: m_SensorName
@@ -37214,7 +37214,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!224 &1866132516
 RectTransform:
   m_ObjectHideFlags: 0
@@ -40827,7 +40827,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &2028791740
 MonoBehaviour:
   m_ObjectHideFlags: 0

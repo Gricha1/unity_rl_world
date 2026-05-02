@@ -14,6 +14,12 @@ set -o pipefail
 cd "$(dirname "$0")"
 cd ..
 
+# Python executable (WSL часто имеет только python3).
+PY_BIN="python"
+if ! command -v python >/dev/null 2>&1; then
+  PY_BIN="python3"
+fi
+
 # Ctrl+C handling: stop progress loop + mlagents-learn + Unity.
 CURRENT_ML_PID=""
 CURRENT_PGID=""
@@ -54,9 +60,10 @@ cleanup_on_exit() {
   pkill -INT -f xvfb-run 2>/dev/null || true
   pkill -TERM -f xvfb-run 2>/dev/null || true
 
+  restore_watcher_checkpoint_staging 2>/dev/null || true
+
   exit "${code}"
 }
-trap cleanup_on_exit INT TERM
 
 # ========== ПАРАМЕТРЫ (правь здесь; не через export) ==========
 FORCE_XVFB=1
@@ -69,7 +76,7 @@ CAPTURE_CAM_B=0
 CAPTURE_CAM_C=0
 CAPTURE_MSAA=1
 CAPTURE_FPS=30
-CAPTURE_SECONDS=10
+CAPTURE_SECONDS=40
 
 VIDEO_FPS_MODE=realtime
 VIDEO_FPS_FALLBACK=30
@@ -97,6 +104,14 @@ EVAL_LAST_N_CHECKPOINTS=0
 EVAL_ALL_CHECKPOINTS=0
 EVAL_RUN_ONCE=0
 SKIP_LATEST_K=0
+
+# Если хочешь прогнать ВООБЩЕ ВСЕ веса заново по порядку (даже если mp4 уже есть) — поставь 1.
+REEVAL_ALL_STEPS=0
+
+# --- Ретраи/ремонт проваленных шагов ---
+# Если mp4 не создан, но остался capture_started.txt — считаем это "залипло" и ретраим.
+# Чтобы не мешать реально идущему шагу, ретраим только если capture_started старше этого порога.
+RETRY_STALE_STARTED_SECONDS=900
 # ==============================================================
 
 if [ -z "${1:-}" ] || [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
@@ -112,7 +127,23 @@ ONLY_STEP="${4:-}"
 BUILD_PATH="build_versions/${ENV_BUILD_NAME}"
 RESULTS_DIR="results/${RUN_ID}"
 VIDEO_ROOT="${RESULTS_DIR}/videos"
-TMP_EVAL_RUN_ID="${RUN_ID}__eval_tmp"
+
+# Inference loads checkpoint.pt under BEHAVIOR_DIR; we stage a chosen step there and restore after each eval (see stage_checkpoint_for_inference_step).
+STAGING_ACTIVE=0
+
+# Only scan checkpoints for the main behavior folder (prevents picking up stray steps from other behaviors/tests).
+BEHAVIOR_DIR="${RESULTS_DIR}/LilyLowLevelAgent"
+if [ ! -d "${BEHAVIOR_DIR}" ]; then
+  # Fallback: first subdir that contains any *-*.pt
+  for d in "${RESULTS_DIR}"/*; do
+    [ -d "${d}" ] || continue
+    if ls "${d}"/*-*.pt >/dev/null 2>&1; then
+      BEHAVIOR_DIR="${d}"
+      break
+    fi
+  done
+fi
+echo "[watcher] behavior dir: ${BEHAVIOR_DIR}"
 
 mkdir -p "${VIDEO_ROOT}"
 
@@ -131,10 +162,10 @@ pick_free_port() {
 }
 
 python_list_checkpoint_steps() {
-  python - <<'PY' "$1"
+  "${PY_BIN}" - <<'PY' "$1"
 import glob, os, re, sys
-results_dir = sys.argv[1]
-pattern = os.path.join(results_dir, "*", "*-*.pt")
+behavior_dir = sys.argv[1]
+pattern = os.path.join(behavior_dir, "*-*.pt")
 steps = set()
 for p in glob.glob(pattern):
     base = os.path.basename(p)
@@ -147,17 +178,17 @@ PY
 }
 
 python_has_any_checkpoint() {
-  python - <<'PY' "$1"
+  "${PY_BIN}" - <<'PY' "$1"
 import glob, os, sys
-results_dir = sys.argv[1]
-pattern = os.path.join(results_dir, "*", "*-*.pt")
+behavior_dir = sys.argv[1]
+pattern = os.path.join(behavior_dir, "*-*.pt")
 print("1" if glob.glob(pattern) else "0")
 PY
 }
 
 list_steps_to_eval() {
   local raw
-  raw="$(python_list_checkpoint_steps "${RESULTS_DIR}")"
+  raw="$(python_list_checkpoint_steps "${BEHAVIOR_DIR}")"
   [ -n "${raw}" ] || return 0
 
   if [ "${SKIP_LATEST_K}" -gt 0 ] 2>/dev/null; then
@@ -186,6 +217,9 @@ list_steps_to_eval() {
 
 already_encoded_target() {
   local step="$1"
+  if [ "${REEVAL_ALL_STEPS}" = "1" ]; then
+    return 1
+  fi
   local ok=1
   if [ "${CAPTURE_CAM_A}" = "1" ] && [ ! -f "${VIDEO_ROOT}/step_${step}_camA.mp4" ]; then ok=0; fi
   if [ "${CAPTURE_CAM_B}" = "1" ] && [ ! -f "${VIDEO_ROOT}/step_${step}_camB.mp4" ]; then ok=0; fi
@@ -193,25 +227,49 @@ already_encoded_target() {
   if [ "${ok}" = "1" ]; then
     return 0
   fi
-  if [ "${CAPTURE_CAM_A}" = "1" ] && [ -f "${VIDEO_ROOT}/step_${step}_camA/capture_started.txt" ]; then return 0; fi
-  if [ "${CAPTURE_CAM_B}" = "1" ] && [ -f "${VIDEO_ROOT}/step_${step}_camB/capture_started.txt" ]; then return 0; fi
-  if [ "${CAPTURE_CAM_C}" = "1" ] && [ -f "${VIDEO_ROOT}/step_${step}_CamOnJack/capture_started.txt" ]; then return 0; fi
+
+  # If capture_started exists but mp4 doesn't, retry only when the marker is stale.
+  is_started_stale() {
+    local f="$1"
+    [ -f "${f}" ] || return 1
+    if [ "${RETRY_STALE_STARTED_SECONDS}" -le 0 ] 2>/dev/null; then
+      return 0
+    fi
+    local now_ts started_ts
+    now_ts="$(date +%s 2>/dev/null || echo 0)"
+    started_ts="$(stat -c '%Y' "${f}" 2>/dev/null || echo 0)"
+    [ "$(( now_ts - started_ts ))" -ge "${RETRY_STALE_STARTED_SECONDS}" ]
+  }
+
+  if [ "${CAPTURE_CAM_A}" = "1" ] && is_started_stale "${VIDEO_ROOT}/step_${step}_camA/capture_started.txt"; then
+    rm -f "${VIDEO_ROOT}/step_${step}_camA/capture_started.txt" 2>/dev/null || true
+    return 1
+  fi
+  if [ "${CAPTURE_CAM_B}" = "1" ] && is_started_stale "${VIDEO_ROOT}/step_${step}_camB/capture_started.txt"; then
+    rm -f "${VIDEO_ROOT}/step_${step}_camB/capture_started.txt" 2>/dev/null || true
+    return 1
+  fi
+  if [ "${CAPTURE_CAM_C}" = "1" ] && is_started_stale "${VIDEO_ROOT}/step_${step}_CamOnJack/capture_started.txt"; then
+    rm -f "${VIDEO_ROOT}/step_${step}_CamOnJack/capture_started.txt" 2>/dev/null || true
+    return 1
+  fi
+
   return 1
 }
 
 python_find_checkpoint_pt_for_step() {
-  python - <<'PY' "$1" "$2"
+  "${PY_BIN}" - <<'PY' "$1" "$2"
 import glob, os, sys
-results_dir = sys.argv[1]
+behavior_dir = sys.argv[1]
 target = int(sys.argv[2])
-pattern = os.path.join(results_dir, "*", "*-%d.pt" % target)
+pattern = os.path.join(behavior_dir, "*-%d.pt" % target)
 hits = sorted(glob.glob(pattern))
 print(hits[0] if hits else "")
 PY
 }
 
 python_can_torch_load_checkpoint() {
-  python - <<'PY' "$1"
+  "${PY_BIN}" - <<'PY' "$1"
 import sys
 path = sys.argv[1]
 try:
@@ -246,10 +304,28 @@ wait_for_stable_file() {
   return 1
 }
 
-prepare_inference_run_for_step() {
+restore_watcher_checkpoint_staging() {
+  [ "${STAGING_ACTIVE:-0}" = "1" ] || return 0
+  [ -n "${BEHAVIOR_DIR:-}" ] || {
+    STAGING_ACTIVE=0
+    return 0
+  }
+  local dst_pt="${BEHAVIOR_DIR}/checkpoint.pt"
+  local backup="${BEHAVIOR_DIR}/checkpoint.pt.__watcher_backup"
+  local partial="${BEHAVIOR_DIR}/checkpoint.pt.__watcher_writing"
+
+  rm -f "${partial}" 2>/dev/null || true
+  rm -f "${dst_pt}" 2>/dev/null || true
+  if [ -f "${backup}" ]; then
+    mv -f "${backup}" "${dst_pt}"
+  fi
+  STAGING_ACTIVE=0
+}
+
+stage_checkpoint_for_inference_step() {
   local step="$1"
   local src_pt
-  src_pt="$(python_find_checkpoint_pt_for_step "${RESULTS_DIR}" "${step}")"
+  src_pt="$(python_find_checkpoint_pt_for_step "${BEHAVIOR_DIR}" "${step}")"
   if [ -z "${src_pt}" ]; then
     echo "[watcher] ERROR: no .pt checkpoint found for step=${step}"
     return 1
@@ -259,24 +335,41 @@ prepare_inference_run_for_step() {
     return 1
   fi
 
-  local tmp_dir="results/${TMP_EVAL_RUN_ID}"
-  local behavior_name
-  behavior_name="$(basename "$(dirname "${src_pt}")")"
-  mkdir -p "${tmp_dir}/${behavior_name}"
-  rm -f "${tmp_dir}/${behavior_name}/checkpoint.pt" 2>/dev/null || true
+  local dst_pt="${BEHAVIOR_DIR}/checkpoint.pt"
+  local backup="${BEHAVIOR_DIR}/checkpoint.pt.__watcher_backup"
+  local partial="${BEHAVIOR_DIR}/checkpoint.pt.__watcher_writing"
 
-  local dst_pt="${tmp_dir}/${behavior_name}/checkpoint.pt"
-  local dst_tmp="${dst_pt}.tmp"
-  rm -f "${dst_tmp}" 2>/dev/null || true
-  cp -f "${src_pt}" "${dst_tmp}"
-  if [ "$(python_can_torch_load_checkpoint "${dst_tmp}")" != "1" ]; then
-    rm -f "${dst_tmp}" 2>/dev/null || true
+  rm -f "${partial}" 2>/dev/null || true
+
+  # Interrupted previous run may leave backup behind.
+  if [ -f "${backup}" ]; then
+    echo "[watcher] WARN: found orphaned ${backup}; restoring as checkpoint.pt before staging step=${step}"
+    rm -f "${dst_pt}" 2>/dev/null || true
+    mv -f "${backup}" "${dst_pt}"
+  fi
+
+  if [ "$(python_can_torch_load_checkpoint "${src_pt}")" != "1" ]; then
     echo "[watcher] WARN: torch.load failed for step=${step} (checkpoint likely incomplete/corrupt). Will retry later."
     return 1
   fi
-  mv -f "${dst_tmp}" "${dst_pt}"
 
-  echo "${TMP_EVAL_RUN_ID}"
+  if [ -f "${dst_pt}" ]; then
+    mv -f "${dst_pt}" "${backup}"
+  fi
+
+  cp -f "${src_pt}" "${partial}"
+  if [ "$(python_can_torch_load_checkpoint "${partial}")" != "1" ]; then
+    rm -f "${partial}" 2>/dev/null || true
+    if [ -f "${backup}" ]; then
+      mv -f "${backup}" "${dst_pt}"
+    fi
+    echo "[watcher] WARN: torch.load failed on staged copy step=${step}. Will retry later."
+    return 1
+  fi
+  mv -f "${partial}" "${dst_pt}"
+
+  STAGING_ACTIVE=1
+  return 0
 }
 
 run_eval_for_step() {
@@ -339,8 +432,7 @@ run_eval_for_step() {
     --quit-delay-seconds "${QUIT_DELAY_SECONDS}"
   )
 
-  local inference_run_id=""
-  if ! inference_run_id="$(prepare_inference_run_for_step "${step}")"; then
+  if ! stage_checkpoint_for_inference_step "${step}"; then
     echo "[watcher] WARN: cannot prepare checkpoint for step=${step}. Will retry later."
     return 0
   fi
@@ -353,7 +445,7 @@ run_eval_for_step() {
     --inference
     --resume
     --env="${BUILD_PATH}"
-    --run-id "${inference_run_id}"
+    --run-id "${RUN_ID}"
     --base-port "${pot}"
     --num-envs 1
     --timeout-wait 600
@@ -393,6 +485,7 @@ run_eval_for_step() {
   else
     if [ -z "${DISPLAY:-}" ]; then
       echo "[watcher] ERROR: DISPLAY is empty and FORCE_XVFB=0. Cannot render/capture video."
+      restore_watcher_checkpoint_staging
       return 1
     fi
     echo "[watcher] running inference with DISPLAY=${DISPLAY} (FORCE_XVFB=0)"
@@ -536,17 +629,23 @@ run_eval_for_step() {
   else
     echo "[watcher] ffmpeg not found"
   fi
+
+  restore_watcher_checkpoint_staging
 }
+
+trap cleanup_on_exit INT TERM
 
 echo "[watcher] scanning checkpoints in ${RESULTS_DIR}"
 
 while true; do
-  if [ "$(python_has_any_checkpoint "${RESULTS_DIR}")" != "1" ]; then
+  if [ "$(python_has_any_checkpoint "${BEHAVIOR_DIR}")" != "1" ]; then
     sleep 20
     continue
   fi
 
-  while read -r step; do
+  # Avoid `while read` under `set -e`: EOF from read can exit 1 and abort the loop early.
+  mapfile -t EVAL_STEPS < <(list_steps_to_eval)
+  for step in "${EVAL_STEPS[@]}"; do
     [ -n "${step}" ] || continue
     if [ -n "${ONLY_STEP}" ] && [ "${step}" != "${ONLY_STEP}" ]; then
       continue
@@ -556,7 +655,7 @@ while true; do
     else
       echo "[watcher] skip step_${step} (already encoded)"
     fi
-  done < <(list_steps_to_eval)
+  done
 
   if [ "${EVAL_RUN_ONCE}" = "1" ]; then
     echo "[watcher] EVAL_RUN_ONCE=1 — done, exiting."
