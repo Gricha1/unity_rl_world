@@ -102,6 +102,10 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
     [Header("Movement")]
     [SerializeField] private float moveSpeed = 3f;
     [SerializeField] private float rotationSpeed = 120f;
+    
+    [Header("Training")]
+    [Tooltip("If true, Jack is frozen in place (no movement/rotation). Useful for training setups.")]
+    [SerializeField] private bool frozen_jack = false;
 
     [Header("Reward")]
     [SerializeField] private float reachDistance = 1.2f;
@@ -680,15 +684,22 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         float rotateInput = 0f;
 
         // --- Движение ---
-        if (moveAction == 1) moveInput = 1f;
-        else if (moveAction == 3) moveInput = -1f;
+        if (!frozen_jack)
+        {
+            if (moveAction == 1) moveInput = 1f;
+            else if (moveAction == 3) moveInput = -1f;
+        }
 
         // --- Поворот ---
-        if (rotateAction == 1) rotateInput = 1f;
-        else if (rotateAction == 3) rotateInput = -1f;
+        if (!frozen_jack)
+        {
+            if (rotateAction == 1) rotateInput = 1f;
+            else if (rotateAction == 3) rotateInput = -1f;
+        }
 
         // --- Поворот ---
-        transform.Rotate(0f, rotateInput * rotationSpeed * Time.deltaTime, 0f);
+        if (!frozen_jack)
+            transform.Rotate(0f, rotateInput * rotationSpeed * Time.deltaTime, 0f);
 
         // --- Гравитация ---
         if (controller.isGrounded)
@@ -702,8 +713,9 @@ public class AgentGoToHouseDiscrete : Agent, IHasHp
         }
 
         // --- Итоговое движение ---
-        Vector3 move = transform.forward * moveInput * moveSpeed +
-                    Vector3.up * verticalVelocity;
+        Vector3 move = frozen_jack
+            ? (Vector3.up * verticalVelocity)
+            : (transform.forward * moveInput * moveSpeed + Vector3.up * verticalVelocity);
 
         controller.Move(move * Time.deltaTime);
 

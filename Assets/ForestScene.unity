@@ -24941,7 +24941,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 644675218892376521, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: MaxStep
-      value: 4000
+      value: 300
       objectReference: {fileID: 0}
     - target: {fileID: 644675218892376521, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: fireVfx
@@ -24950,6 +24950,10 @@ PrefabInstance:
     - target: {fileID: 644675218892376521, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: maxHeat
       value: 20
+      objectReference: {fileID: 0}
+    - target: {fileID: 644675218892376521, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
+      propertyPath: frozen_jack
+      value: 1
       objectReference: {fileID: 0}
     - target: {fileID: 644675218892376521, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: houseTarget
@@ -25125,7 +25129,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 5016354465868146490, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: m_BehaviorType
-      value: 2
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 5131987342073370064, guid: 2f0b04bbc5c346843a2b7b4b9765ea30, type: 3}
       propertyPath: m_Layer
@@ -35517,8 +35521,8 @@ MonoBehaviour:
   agentParameters:
     maxStep: 0
   hasUpgradedFromAgentParameters: 1
-  MaxStep: 4000
-  useUtilitySoftmaxSampling: 1
+  MaxStep: 1500
+  useUtilitySoftmaxSampling: 0
   tau: 0.2
   noise: 0.15
   accessMaxDistance: 20
@@ -35538,7 +35542,7 @@ MonoBehaviour:
     serializedVersion: 2
     m_Bits: 0
   kissDistance: 2.5
-  kissReward: 1
+  kissReward: 5
   moveTowardsJackRewardScale: 0.3
   flowerSpawner: {fileID: 0}
   flowerLayer:
@@ -35553,6 +35557,8 @@ MonoBehaviour:
   rotationSpeed: 120
   moveTowardsFlowerRewardScale: 0.3
   stepPenalty: -0.001
+  lookAtJackRewardScale: 0.01
+  lookAtJackMinDot: 0.6
   maxFlowerCount: 20
   flowerDecayInterval: 8
   maxLove: 20
@@ -40827,7 +40833,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 0
+  m_IsActive: 1
 --- !u!114 &2028791740
 MonoBehaviour:
   m_ObjectHideFlags: 0

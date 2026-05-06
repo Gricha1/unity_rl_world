@@ -71,6 +71,10 @@ public class LilyScript : Agent, IHasHp
     [Header("Rewards")]
     [SerializeField] private float moveTowardsFlowerRewardScale = 0.3f;
     [SerializeField] private float stepPenalty = -0.001f;
+    [Tooltip("Плотная награда за то, что Lily смотрит в сторону Jack (dot(forward, dirToJack)). 0 = выключено.")]
+    [SerializeField] private float lookAtJackRewardScale = 0.10f;
+    [Tooltip("Порог dot, ниже которого награда = 0. 0.5 ~ 60°, 0.7 ~ 45°.")]
+    [SerializeField] [Range(-1f, 1f)] private float lookAtJackMinDot = 0.6f;
 
     [Header("Счётчики (растут от действий, со временем падают)")]
     [SerializeField] private int maxFlowerCount = 20;
@@ -514,6 +518,27 @@ public class LilyScript : Agent, IHasHp
         _lastPlanarMoveInput = moveInput;
 
         AddReward(stepPenalty);
+        
+        // Reward for facing Jack (dense shaping): only for option "kiss" (1) and when Jack is known.
+        if (currentOption == 1 && lookAtJackRewardScale != 0f && jackTarget != null)
+        {
+            Vector3 toJack = jackTarget.position - transform.position;
+            toJack.y = 0f;
+            if (toJack.sqrMagnitude > 1e-6f)
+            {
+                toJack.Normalize();
+                Vector3 fwd = transform.forward;
+                fwd.y = 0f;
+                fwd.Normalize();
+                float dot = Vector3.Dot(fwd, toJack); // [-1,1]
+                if (dot > lookAtJackMinDot)
+                {
+                    // Map [minDot..1] -> [0..1]
+                    float t = (dot - lookAtJackMinDot) / Mathf.Max(1e-6f, 1f - lookAtJackMinDot);
+                    AddReward(lookAtJackRewardScale * Mathf.Clamp01(t));
+                }
+            }
+        }
 
         // Затухание счётчиков со временем
         flowerDecayTimer += Time.deltaTime;

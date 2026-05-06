@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Collections;
 using Unity.MLAgents;
 using UnityEngine;
 
@@ -45,6 +46,7 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
     private string _cameraAName;
     private string _cameraBName;
     private string _cameraCName;
+    private bool _captureAScreenFinal; // include Overlay HUD by capturing final screen at end of frame
     private long _quitAfterSteps = -1;
     private int _quitAfterEpisodes = -1;
     private float _quitAfterSeconds = -1f;
@@ -70,6 +72,7 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
     private Vector3 _overheadLookAtOffset = new Vector3(0f, 1.0f, 0f);
     private Texture2D _captureTexture;
     private RenderTexture _captureRt;
+    private bool _pendingEndOfFrameCaptureA;
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void Bootstrap()
@@ -342,10 +345,22 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
 
         if (!string.IsNullOrWhiteSpace(_captureDir))
         {
-            if (_cameraA != null)
-                CaptureCameraToImage(_cameraA, _captureDir, ref _frameIndexA);
+            if (_captureAScreenFinal)
+            {
+                // Capture after all rendering (including ScreenSpaceOverlay UI).
+                if (!_pendingEndOfFrameCaptureA)
+                {
+                    _pendingEndOfFrameCaptureA = true;
+                    StartCoroutine(CaptureAScreenAtEndOfFrame());
+                }
+            }
             else
-                CaptureScreenFallback(_captureDir, ref _frameIndexA);
+            {
+                if (_cameraA != null)
+                    CaptureCameraToImage(_cameraA, _captureDir, ref _frameIndexA);
+                else
+                    CaptureScreenFallback(_captureDir, ref _frameIndexA);
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(_captureDirB))
@@ -498,6 +513,41 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         index++;
     }
 
+    private IEnumerator CaptureAScreenAtEndOfFrame()
+    {
+        yield return new WaitForEndOfFrame();
+        try
+        {
+            // Backbuffer includes Overlay UI; ReadPixels reads from current screen.
+            RenderTexture prev = RenderTexture.active;
+            RenderTexture.active = null;
+            _captureTexture.ReadPixels(new Rect(0, 0, _captureWidth, _captureHeight), 0, 0);
+            _captureTexture.Apply(false, false);
+            RenderTexture.active = prev;
+
+            byte[] bytes;
+            string ext;
+            if (string.Equals(_captureFormat, "png", StringComparison.OrdinalIgnoreCase))
+            {
+                bytes = _captureTexture.EncodeToPNG();
+                ext = "png";
+            }
+            else
+            {
+                bytes = ImageConversion.EncodeToJPG(_captureTexture, Mathf.Clamp(_jpgQuality, 1, 100));
+                ext = "jpg";
+            }
+
+            var path = Path.Combine(_captureDir, $"frame_{_frameIndexA:D06}.{ext}");
+            File.WriteAllBytes(path, bytes);
+            _frameIndexA++;
+        }
+        finally
+        {
+            _pendingEndOfFrameCaptureA = false;
+        }
+    }
+
     private void ParseArgs(string[] args)
     {
         var dict = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -575,6 +625,12 @@ public sealed class CommandLineEvalCapture : MonoBehaviour
         if (dict.TryGetValue("--capture-camera-a", out var cameraAName) && !string.IsNullOrWhiteSpace(cameraAName))
         {
             _cameraAName = cameraAName;
+        }
+
+        if (dict.TryGetValue("--capture-a-source", out var srcA) && !string.IsNullOrWhiteSpace(srcA))
+        {
+            var s = srcA.Trim().ToLowerInvariant();
+            _captureAScreenFinal = s == "screen";
         }
 
         if (dict.TryGetValue("--capture-camera-b", out var cameraBName) && !string.IsNullOrWhiteSpace(cameraBName))

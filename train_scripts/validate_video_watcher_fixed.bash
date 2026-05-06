@@ -69,11 +69,14 @@ cleanup_on_exit() {
 FORCE_XVFB=1
 
 CAPTURE_EVERY=1
-CAPTURE_WIDTH=1280
-CAPTURE_HEIGHT=720
+CAPTURE_WIDTH=1920
+CAPTURE_HEIGHT=1080
 CAPTURE_CAM_A=1
 CAPTURE_CAM_B=0
 CAPTURE_CAM_C=0
+# camera = fast camera.Render() capture (без Overlay HUD)
+# screen = финальный кадр экрана (включает ScreenSpaceOverlay HUD) — может быть обрезан, зато простой режим
+CAPTURE_CAM_A_SOURCE="screen"
 CAPTURE_MSAA=1
 CAPTURE_FPS=30
 CAPTURE_SECONDS=40
@@ -131,17 +134,28 @@ VIDEO_ROOT="${RESULTS_DIR}/videos"
 # Inference loads checkpoint.pt under BEHAVIOR_DIR; we stage a chosen step there and restore after each eval (see stage_checkpoint_for_inference_step).
 STAGING_ACTIVE=0
 
-# Only scan checkpoints for the main behavior folder (prevents picking up stray steps from other behaviors/tests).
-BEHAVIOR_DIR="${RESULTS_DIR}/LilyLowLevelAgent"
-if [ ! -d "${BEHAVIOR_DIR}" ]; then
-  # Fallback: first subdir that contains any *-*.pt
+# Checkpoint folder under results/<run_id>/: prefer LilyLowLevelAgent if it actually has *.pt,
+# otherwise first subdir that has *-<steps>.pt (e.g. Jack runs use JackLowLevelAgent).
+watcher_dir_has_training_pts() {
+  local d="$1"
+  [ -d "${d}" ] || return 1
+  ls "${d}"/*-*.pt >/dev/null 2>&1
+}
+
+BEHAVIOR_DIR=""
+_LILY="${RESULTS_DIR}/LilyLowLevelAgent"
+if watcher_dir_has_training_pts "${_LILY}"; then
+  BEHAVIOR_DIR="${_LILY}"
+else
   for d in "${RESULTS_DIR}"/*; do
     [ -d "${d}" ] || continue
-    if ls "${d}"/*-*.pt >/dev/null 2>&1; then
-      BEHAVIOR_DIR="${d}"
-      break
-    fi
+    watcher_dir_has_training_pts "${d}" || continue
+    BEHAVIOR_DIR="${d}"
+    break
   done
+fi
+if [ -z "${BEHAVIOR_DIR}" ]; then
+  BEHAVIOR_DIR="${_LILY}"
 fi
 echo "[watcher] behavior dir: ${BEHAVIOR_DIR}"
 
@@ -410,7 +424,7 @@ run_eval_for_step() {
 
   local env_args=()
   if [ "${CAPTURE_CAM_A}" = "1" ]; then
-    env_args+=(--capture-dir "${cap_di_a}" --capture-camera-a "CamA")
+    env_args+=(--capture-dir "${cap_di_a}" --capture-camera-a "CamA" --capture-a-source "${CAPTURE_CAM_A_SOURCE}")
   fi
   if [ "${CAPTURE_CAM_B}" = "1" ]; then
     env_args+=(--capture-dir-b "${cap_di_b}" --capture-camera-b "CamB")
@@ -639,12 +653,19 @@ echo "[watcher] scanning checkpoints in ${RESULTS_DIR}"
 
 while true; do
   if [ "$(python_has_any_checkpoint "${BEHAVIOR_DIR}")" != "1" ]; then
+    echo "[watcher] no *-*.pt in ${BEHAVIOR_DIR} — waiting 20s (not scanning; checkpoints absent or unreadable)."
     sleep 20
     continue
   fi
 
   # Avoid `while read` under `set -e`: EOF from read can exit 1 and abort the loop early.
   mapfile -t EVAL_STEPS < <(list_steps_to_eval)
+  if [ "${#EVAL_STEPS[@]}" -eq 0 ]; then
+    echo "[watcher] checkpoint folder has .pt files but step list is empty (filters?) — waiting 20s."
+    sleep 20
+    continue
+  fi
+
   for step in "${EVAL_STEPS[@]}"; do
     [ -n "${step}" ] || continue
     if [ -n "${ONLY_STEP}" ] && [ "${step}" != "${ONLY_STEP}" ]; then
@@ -662,6 +683,7 @@ while true; do
     break
   fi
 
+  echo "[watcher] round done — next scan in 20s."
   sleep 20
 done
 
