@@ -41,7 +41,9 @@ public class LilyScript : Agent, IHasHp
     [Header("Jack (опция «поцелуй»)")]
     [SerializeField] private Transform jackTarget;
     [SerializeField] private LayerMask jackLayer;
-    [SerializeField] private float kissDistance = 2.5f;
+    [SerializeField] private float kissDistance = 1.4f;
+    [Tooltip("Требовать, чтобы Jack был спереди Lily для засчитывания поцелуя. 1 = строго прямо, 0 = 180° (не проверять).")]
+    [SerializeField] [Range(0f, 1f)] private float kissMinForwardDot = 0.5f; // ~60°
     [SerializeField] private float kissReward = 10f;
     [SerializeField] private float moveTowardsJackRewardScale = 0.3f;
 
@@ -406,7 +408,15 @@ public class LilyScript : Agent, IHasHp
         Vector3 j = jackTarget.position;
         p.y = 0f;
         j.y = 0f;
-        float d = Vector3.Distance(p, j);
+        Vector3 delta = j - p;
+        float d = delta.magnitude;
+        if (d <= 0.0001f) return true;
+        Vector3 toJack = delta / d;
+        Vector3 fwd = transform.forward;
+        fwd.y = 0f;
+        if (fwd.sqrMagnitude > 1e-6f) fwd.Normalize();
+        float dot = Vector3.Dot(fwd, toJack);
+        if (kissMinForwardDot > 0f && dot < kissMinForwardDot) return false;
         if (d <= kissDistance) return true;
         Collider[] hits = Physics.OverlapSphere(transform.position, kissDistance, jackLayer);
         foreach (var h in hits)
